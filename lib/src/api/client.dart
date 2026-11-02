@@ -29,24 +29,27 @@ class TeleJoinProxy {
   final FutureOr<Map<String, String>> Function()? headers;
 }
 
-/// The `X-Client-Platform` value for this device: `web`, `ios`, `android`, `macos`, `windows`,
-/// `linux` or `fuchsia`.
+/// The `X-Client-Platform` value for this device, naming the SDK and the OS so the call record
+/// shows both: `flutter-web`, `flutter-ios`, `flutter-android`, `flutter-macos`, `flutter-windows`,
+/// `flutter-linux` or `flutter-fuchsia`.
 String defaultTelePlatform() {
-  if (kIsWeb) return 'web';
-  return switch (defaultTargetPlatform) {
+  if (kIsWeb) return 'flutter-web';
+  return 'flutter-${switch (defaultTargetPlatform) {
     TargetPlatform.android => 'android',
     TargetPlatform.iOS => 'ios',
     TargetPlatform.macOS => 'macos',
     TargetPlatform.windows => 'windows',
     TargetPlatform.linux => 'linux',
     TargetPlatform.fuchsia => 'fuchsia',
-  };
+  }}';
 }
 
 /// The Tele REST API, acting as the signed-in user (user token).
 ///
 /// Tokens come from [tokenProvider]. The client keeps the last token, fetches a new one shortly
-/// before it expires, and on a `401` fetches a fresh one and retries the request once.
+/// before it expires, and on a `401` fetches a fresh one and retries the request once. A token
+/// provider that throws surfaces as a [TeleException] with code `token_provider`; a request that
+/// takes longer than [timeout] as one with code `timeout`.
 class TeleClient {
   TeleClient({
     required TeleTokenProvider tokenProvider,
@@ -54,6 +57,7 @@ class TeleClient {
     http.Client? httpClient,
     String? platform,
     this.joinProxy,
+    this.timeout = const Duration(seconds: 20),
   })  : _tokenProvider = tokenProvider,
         baseUrl = baseUrl ?? defaultBaseUrl,
         platform = platform ?? defaultTelePlatform(),
@@ -66,6 +70,9 @@ class TeleClient {
 
   /// Sent as `X-Client-Platform` on joins (≤32 characters).
   final String platform;
+
+  /// How long one request may take, including reading the response.
+  final Duration timeout;
 
   /// When set, [joinInvite] and [joinCall] go through your backend.
   final TeleJoinProxy? joinProxy;
@@ -327,7 +334,9 @@ class TeleClient {
 
   Future<http.Response> _roundTrip(http.Request req) async {
     try {
-      return await http.Response.fromStream(await _http.send(req));
+      return await _http.send(req).then(http.Response.fromStream).timeout(timeout);
+    } on TimeoutException {
+      throw TeleException(status: 0, code: 'timeout', message: 'no response within ${timeout.inSeconds}s');
     } on http.ClientException catch (e) {
       throw TeleException(status: 0, code: 'network_error', message: e.message);
     }
@@ -356,9 +365,12 @@ class TeleClient {
     final t = _token;
     if (t != null && !_nearExpiry(t)) return Future.value(t);
     // Concurrent requests share one provider call.
-    return _pending ??= _tokenProvider().then((v) {
+    return _pending ??= Future.sync(_tokenProvider).then((v) {
       _token = v;
       return v;
+    }, onError: (Object e) {
+      if (e is TeleException) throw e;
+      throw TeleException(status: 0, code: 'token_provider', message: 'the token provider failed: $e');
     }).whenComplete(() => _pending = null);
   }
 

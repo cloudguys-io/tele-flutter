@@ -222,6 +222,86 @@ void main() {
     expect(TeleCallTheme.light.lerp(TeleCallTheme.dark, 1).background, TeleCallTheme.dark.background);
   });
 
+  testWidgets('landscape phone (568x320) with every banner up does not overflow', (tester) async {
+    final c = await pump(tester, size: const Size(568, 320));
+    await c.join();
+    engine.join('Ann', screenShare: true);
+    engine.recording = true;
+    engine.audioOk = false;
+    engine.emit(const CallEngineAudioPlayback(false));
+    engine.emit(const CallEngineRecordingChanged(true));
+    engine.emit(const CallEngineReconnecting());
+    engine.emit(CallEngineMediaError(CallMediaSource.microphone, Exception('x')));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.text('This call is being recorded'), findsOneWidget);
+    expect(find.text('Tap to turn on call audio'), findsOneWidget);
+    expect(find.bySemanticsLabel('Leave'), findsOneWidget);
+    // The control row scrolls instead of wrapping.
+    await tester.tap(find.text('Tap to turn on call audio'));
+    await tester.pump();
+    expect(engine.calls, contains('startAudio'));
+    await tester.tap(find.bySemanticsLabel('Chat'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a tile keeps its element (and video renderer) when it moves to the stage', (tester) async {
+    final c = await pump(tester);
+    await c.join();
+    engine.join('Ann');
+    engine.join('Bob');
+    await tester.pump();
+    Element annElement() => tester.element(find.bySemanticsLabel('Ann'));
+    final before = annElement();
+    c.togglePinned('u:Ann:camera');
+    await tester.pump();
+    expect(c.stage.focus!.key, 'u:Ann:camera');
+    expect(identical(annElement(), before), isTrue);
+  });
+
+  testWidgets('screen-share tiles say so in the pin label', (tester) async {
+    final c = await pump(tester);
+    await c.join();
+    engine.join('Ann', screenShare: true);
+    await tester.pump();
+    expect(find.bySemanticsLabel('Pin Ann, screen'), findsOneWidget);
+    expect(find.bySemanticsLabel('Pin Ann'), findsOneWidget);
+  });
+
+  testWidgets('a failed send keeps the draft and shows a notice', (tester) async {
+    final c = await pump(tester);
+    await c.join();
+    c.chatOpen = true;
+    await tester.pump();
+    engine.chatError = Exception('offline');
+    await tester.enterText(find.byType(TextField), 'keep me');
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pump();
+    expect(find.widgetWithText(TextField, 'keep me'), findsOneWidget);
+    expect(find.text("Couldn't send the message. Try again."), findsOneWidget);
+  });
+
+  testWidgets('swapping in a new controller starts it', (tester) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final first = TeleCallController(join: () async => joinAs(), engine: engine);
+    final second = FakeEngine();
+    final next = TeleCallController(join: () async => joinAs(), engine: second);
+    addTearDown(first.dispose);
+    addTearDown(next.dispose);
+    Widget app(TeleCallController c) => MaterialApp(home: Scaffold(body: TeleCallScreen(controller: c, lobby: false)));
+    await tester.pumpWidget(app(first));
+    await tester.pump();
+    expect(first.phase, TeleCallPhase.live);
+    await tester.pumpWidget(app(next));
+    await tester.pump();
+    await tester.pump();
+    expect(next.phase, TeleCallPhase.live);
+    expect(second.calls.where((x) => x.startsWith('connect')), hasLength(1));
+  });
+
   test('strings fall back to English and format placeholders', () {
     final s = TeleStrings.of('fr');
     expect(s.languageCode, 'en');

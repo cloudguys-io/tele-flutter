@@ -121,10 +121,19 @@ class _TeleCallScreenState extends State<TeleCallScreen> {
   void initState() {
     super.initState();
     _subscribe();
+    _start();
+  }
+
+  /// Opens the lobby preview, or (without a lobby) joins after the first frame.
+  void _start() {
+    final controller = c;
+    if (controller.phase != TeleCallPhase.lobby) return;
     if (widget.lobby) {
-      unawaited(c.startPreview());
+      unawaited(controller.startPreview());
     } else {
-      unawaited(c.join());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && identical(controller, c)) unawaited(controller.join());
+      });
     }
   }
 
@@ -134,6 +143,7 @@ class _TeleCallScreenState extends State<TeleCallScreen> {
     if (old.controller != widget.controller) {
       unawaited(_sub?.cancel());
       _subscribe();
+      _start();
     }
   }
 
@@ -395,9 +405,7 @@ class _Live extends StatelessWidget {
     final notice = c.notice;
     final e = c.engine;
 
-    final controls = Wrap(
-      alignment: WrapAlignment.center,
-      children: [
+    final buttons = <Widget>[
         TeleControlButton(
           icon: c.microphoneEnabled ? Icons.mic : Icons.mic_off,
           label: s[c.microphoneEnabled ? TeleStringKey.mute : TeleStringKey.unmute],
@@ -458,53 +466,84 @@ class _Live extends StatelessWidget {
         if (c.canEndForAll)
           TeleControlButton(icon: Icons.cancel_presentation, label: s[TeleStringKey.endForAll], danger: true, onPressed: () => _confirmEnd(context)),
         TeleControlButton(icon: Icons.call_end, label: s[TeleStringKey.leave], danger: true, onPressed: c.leave),
-      ],
-    );
+    ];
 
-    final main = Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(c.call?.title ?? '',
-                    overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, color: t.text)),
+    // Banners float over the top of the stage, so they never push the controls off a short screen.
+    final banners = [
+      if (screen.recordingIndicator && c.isRecording)
+        TeleBanner(text: s[TeleStringKey.recording], icon: Icons.fiber_manual_record, color: t.danger),
+      if (c.reconnecting) TeleBanner(text: s[TeleStringKey.reconnecting], icon: Icons.sync),
+      if (c.needsAudioStart) TeleBanner(text: s[TeleStringKey.enableAudio], icon: Icons.volume_up, color: t.accent, onTap: c.startAudio),
+      if (notice != null)
+        TeleBanner(
+          text: s.format(notice.key, notice.vars),
+          icon: Icons.info_outline,
+          onDismiss: c.dismissNotice,
+          dismissLabel: s[TeleStringKey.exit],
+        ),
+    ];
+
+    Widget main(BoxConstraints box) {
+      final short = box.maxHeight < 480;
+      // On short screens (phones in landscape) the controls are one scrollable row.
+      final controls = short
+          ? SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(mainAxisSize: MainAxisSize.min, children: buttons),
+            )
+          : Wrap(alignment: WrapAlignment.center, children: buttons);
+      return Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, short ? 2 : 8, 16, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(c.call?.title ?? '',
+                      overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, color: t.text)),
+                ),
+                ListenableBuilder(
+                  listenable: c.media,
+                  builder: (_, _) => Text(s.format(TeleStringKey.inCall, {'count': c.participantCount}), style: TextStyle(color: t.muted)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.all(short ? 4 : 8),
+              child: Stack(
+                children: [
+                  Positioned.fill(child: TeleStageView(controller: c, strings: s)),
+                  if (banners.isNotEmpty)
+                    Positioned(
+                      top: 4,
+                      left: 4,
+                      right: 4,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: box.maxHeight * 0.45),
+                        child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: banners)),
+                      ),
+                    ),
+                ],
               ),
-              Text(s.format(TeleStringKey.inCall, {'count': c.participantCount}), style: TextStyle(color: t.muted)),
-            ],
+            ),
           ),
-        ),
-        if (screen.recordingIndicator && c.isRecording)
-          TeleBanner(text: s[TeleStringKey.recording], icon: Icons.fiber_manual_record, color: t.danger),
-        if (c.reconnecting) TeleBanner(text: s[TeleStringKey.reconnecting], icon: Icons.sync),
-        if (notice != null)
-          TeleBanner(
-            text: s.format(notice.key, notice.vars),
-            icon: Icons.info_outline,
-            onDismiss: c.dismissNotice,
-            dismissLabel: s[TeleStringKey.exit],
-          ),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: TeleStageView(controller: c, strings: s),
-          ),
-        ),
-        Padding(padding: const EdgeInsets.only(bottom: 8), child: controls),
-      ],
-    );
+          Center(child: Padding(padding: EdgeInsets.only(bottom: short ? 2 : 8), child: controls)),
+        ],
+      );
+    }
 
     return LayoutBuilder(builder: (context, box) {
       final chatOpen = screen.chat && c.chatOpen;
       final panel = TeleChatPanel(controller: c, strings: s, onClose: () => c.chatOpen = false);
       if (box.maxWidth >= 900) {
         return Row(children: [
-          Expanded(child: main),
+          Expanded(child: LayoutBuilder(builder: (_, b) => main(b))),
           if (chatOpen) ...[VerticalDivider(width: 1, color: t.line), SizedBox(width: 340, child: panel)],
         ]);
       }
-      return Stack(children: [main, if (chatOpen) Positioned.fill(child: panel)]);
+      return Stack(children: [main(box), if (chatOpen) Positioned.fill(child: panel)]);
     });
   }
 }

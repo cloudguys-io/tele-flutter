@@ -91,6 +91,19 @@ class FakeEngine implements CallEngine {
   @override
   bool canShareScreen = true;
 
+  bool audioOk = true;
+
+  @override
+  bool get canPlaybackAudio => audioOk;
+
+  @override
+  Future<void> startAudio() async {
+    calls.add('startAudio');
+    audioOk = true;
+  }
+
+  Object? chatError;
+
   @override
   VideoTrack? get previewTrack => null;
 
@@ -160,6 +173,7 @@ class FakeEngine implements CallEngine {
 
   @override
   Future<String> sendChat(String text) async {
+    if (chatError != null) throw chatError!;
     sent.add(text);
     return 'TS_local_${++_stream}';
   }

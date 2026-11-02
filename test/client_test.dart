@@ -510,8 +510,33 @@ void main() {
     test('the default base URL and platform', () {
       final c = TeleClient(tokenProvider: () async => 't');
       expect(c.baseUrl.toString(), 'https://tele-api.cloudguys.io');
-      expect(c.platform, isNotEmpty);
+      expect(c.platform, startsWith('flutter-'));
+      expect(c.platform.length, lessThanOrEqualTo(32));
+      expect(c.timeout, const Duration(seconds: 20));
       c.close();
+    });
+
+    test('a slow response becomes a timeout TeleException', () async {
+      final client = TeleClient(
+        tokenProvider: () async => 't',
+        timeout: const Duration(milliseconds: 50),
+        httpClient: MockClient((_) => Future.delayed(const Duration(seconds: 2), () => http.Response('{}', 200))),
+      );
+      await expectLater(client.me(), throwsA(isA<TeleException>().having((e) => e.code, 'code', 'timeout').having((e) => e.status, 'status', 0)));
+    });
+
+    test('a failing token provider becomes a token_provider TeleException', () async {
+      var calls = 0;
+      final client = TeleClient(
+        tokenProvider: () async {
+          calls++;
+          throw StateError('signed out');
+        },
+        httpClient: MockClient((_) async => fail('no request without a token')),
+      );
+      await expectLater(client.me(), throwsA(isA<TeleException>().having((e) => e.code, 'code', 'token_provider')));
+      await expectLater(client.joinInvite('x'), throwsA(isA<TeleException>().having((e) => e.code, 'code', 'token_provider')));
+      expect(calls, 2, reason: 'a failure is not cached');
     });
 
     test('a base URL with a path prefix keeps it', () async {

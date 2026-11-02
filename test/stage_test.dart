@@ -87,6 +87,12 @@ void main() {
       expect(cfg.toMap()['iceServers'], isNull, reason: 'no servers passed, so the SDK keeps its defaults');
     });
 
+    test('an empty ice_servers list also leaves the SDK defaults', () {
+      final join = TeleJoinResponse.fromJson({...joinJson, 'ice_servers': <Object>[]});
+      expect(join.iceServers, isEmpty);
+      expect(rtcConfigurationFor(join).iceServers, isNull);
+    });
+
     test('disconnect reasons', () {
       expect(disconnectCauseOf(DisconnectReason.clientInitiated), isNull);
       expect(disconnectCauseOf(DisconnectReason.roomDeleted), CallDisconnectCause.roomDeleted);

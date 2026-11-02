@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -24,6 +25,8 @@ TeleJoinResponse joinAs({String role = 'host', String callId = 'c2'}) => TeleJoi
 class Backend {
   Backend({this.history = const []});
   final List<Map<String, Object?>> history;
+  String? joinError;
+  int endStatus = 200;
   final requests = <http.Request>[];
   int tokens = 0;
 
@@ -38,7 +41,11 @@ class Backend {
         'POST /v1/calls/c2/messages' => (201, {'stream_id': (jsonDecode(req.body) as Map)['stream_id'], 'created': true}),
         'POST /v1/calls/c2/recording/start' => (202, {...recordingJson, 'state': 'recording'}),
         'POST /v1/calls/c2/recording/stop' => (409, {'error': {'code': 'not_recording', 'message': 'no'}}),
-        'POST /v1/calls/c2/end' => (200, {...instantCallJson, 'status': 'ended'}),
+        'POST /v1/calls/c2/end' => endStatus == 200 ? (200, {...instantCallJson, 'status': 'ended'}) : (endStatus, {'error': {'code': 'forbidden', 'message': 'no'}}),
+        'POST /v1/calls/c2/join' => joinError != null
+            ? (409, {'error': {'code': joinError, 'message': 'no'}})
+            : (200, {...joinJson, 'call': {...instantCallJson, 'id': 'c2'}}),
+        'POST /v1/invites/inv1/join' => (200, {...joinJson, 'call': {...instantCallJson, 'id': 'c2'}}),
         _ => (404, {'error': {'code': 'not_found', 'message': key}}),
       };
       return http.Response.bytes(utf8.encode(jsonEncode(body)), status);
@@ -181,7 +188,9 @@ void main() {
       await c.setCamera(false);
       engine.emit(const CallEngineDisconnected(CallDisconnectCause.connectionLost));
       await settle();
-      expect(joins, 2);
+      expect(joins, 1, reason: 'the rejoin goes through client.joinCall');
+      expect(backend.paths, contains('POST /v1/calls/c2/join'));
+      expect(engine.calls, contains('disconnect'), reason: 'the dead room is dropped first');
       expect(c.phase, TeleCallPhase.live);
       expect(c.reconnecting, isFalse);
       expect(engine.calls.where((x) => x.startsWith('connect')).last, 'connect:mic=true,cam=false');
@@ -434,10 +443,118 @@ void main() {
     });
   });
 
-  test('dispose releases the engine', () async {
+  test('a caller-supplied engine is disconnected, not disposed, unless ownsEngine', () async {
     final c = make();
     c.dispose();
     await settle();
-    expect(engine.calls, contains('dispose'));
+    expect(engine.calls, isNot(contains('dispose')));
+    expect(engine.calls, contains('disconnect'));
+    final other = FakeEngine();
+    TeleCallController(join: () async => joinAs(), engine: other, ownsEngine: true).dispose();
+    await settle();
+    expect(other.calls, contains('dispose'));
+  });
+
+  group('review fixes', () {
+    test('an invite call rejoins by call id, so the invite is not used again', () async {
+      final backend = Backend();
+      final c = TeleCallController.invite(backend.client, 'inv1', engine: engine, microphone: false, persistChat: false);
+      await c.join();
+      expect(engine.calls.first, 'connect:mic=false,cam=true');
+      engine.emit(const CallEngineDisconnected(CallDisconnectCause.connectionLost));
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      await settle();
+      expect(backend.paths.where((p) => p.endsWith('/join')), ['POST /v1/invites/inv1/join', 'POST /v1/calls/c2/join']);
+      expect(c.phase, TeleCallPhase.live);
+      c.dispose();
+    });
+
+    for (final code in ['invite_revoked', 'not_invited']) {
+      test('$code during a rejoin is final', () async {
+        final backend = Backend()..joinError = code;
+        final c = make(client: backend.client);
+        await c.join();
+        engine.emit(const CallEngineDisconnected(CallDisconnectCause.connectionLost));
+        await settle();
+        expect(backend.paths.where((p) => p == 'POST /v1/calls/c2/join'), hasLength(1));
+        expect(c.endReason, TeleEndReason.disconnected);
+      });
+    }
+
+    test('while rejoining, the old room participants are gone from the stage', () async {
+      final c = TeleCallController(
+        join: () async => joinAs(),
+        rejoin: (_) => Completer<TeleJoinResponse>().future,
+        engine: engine,
+        rejoinDelay: Duration.zero,
+      );
+      await c.join();
+      engine.join('ann');
+      expect(c.participantCount, 2);
+      engine.emit(const CallEngineDisconnected(CallDisconnectCause.connectionLost));
+      await settle();
+      expect(c.reconnecting, isTrue);
+      expect(c.participants, isEmpty);
+      expect(c.stage.rest, isEmpty);
+    });
+
+    test('a failed join closes the lobby preview', () async {
+      final c = make(join: () async => throw const TeleException(status: 409, code: 'call_full', message: 'full'));
+      await c.startPreview();
+      expect(engine.previewOn, isTrue);
+      await c.join();
+      expect(engine.previewOn, isFalse);
+    });
+
+    test('a failed chat send keeps nothing, returns false and shows a notice', () async {
+      final c = make();
+      await c.join();
+      engine.chatError = Exception('not connected');
+      expect(await c.sendChat('hello'), isFalse);
+      expect(c.messages, isEmpty);
+      expect(c.notice!.key, TeleStringKey.chatFailed);
+    });
+
+    test('messages over 2000 code points are not sent', () async {
+      final c = make();
+      await c.join();
+      expect(await c.sendChat('হ' * 2001), isFalse);
+      expect(await c.sendChat('😀' * 2000), isTrue, reason: 'emoji count as one code point each');
+      expect(engine.sent, hasLength(1));
+    });
+
+    test('a failed end for all shows a notice and stays in the call', () async {
+      final backend = Backend()..endStatus = 403;
+      final c = make(client: backend.client);
+      await c.join();
+      await c.endForAll();
+      expect(c.phase, TeleCallPhase.live);
+      expect(c.notice!.key, TeleStringKey.endForAllFailed);
+    });
+
+    test('blocked autoplay asks for a tap, and startAudio clears it', () async {
+      engine.audioOk = false;
+      final c = make();
+      await c.join();
+      expect(c.needsAudioStart, isTrue);
+      await c.startAudio();
+      expect(engine.calls, contains('startAudio'));
+      expect(c.needsAudioStart, isFalse);
+      engine.emit(const CallEngineAudioPlayback(false));
+      expect(c.needsAudioStart, isTrue);
+    });
+
+    test('media changes notify the media listenable only', () async {
+      final c = make();
+      await c.join();
+      var main = 0, media = 0;
+      c.addListener(() => main++);
+      c.media.addListener(() => media++);
+      engine.emit(const CallEngineChanged());
+      c.togglePinned('u:me:camera');
+      expect((main, media), (0, 2));
+      await c.setMicrophone(false);
+      expect(main, greaterThan(0));
+    });
   });
 }

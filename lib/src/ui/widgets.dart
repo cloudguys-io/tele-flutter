@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart' show VideoTrack, VideoTrackRenderer, VideoViewFit, VideoViewMirrorMode;
 
 import '../call/controller.dart';
@@ -114,6 +117,7 @@ class TeleVideo extends StatelessWidget {
     if (t == null) return Center(child: TeleAvatar(name: name));
     return VideoTrackRenderer(
       t,
+      key: ObjectKey(t),
       fit: contain ? VideoViewFit.contain : VideoViewFit.cover,
       mirrorMode: mirror ? VideoViewMirrorMode.mirror : VideoViewMirrorMode.off,
     );
@@ -139,21 +143,25 @@ class TeleTileView extends StatelessWidget {
   final bool canPin;
   final VoidCallback onTogglePin;
 
-  String get label {
+  /// The name, with "(you)" and ", screen" as they apply.
+  String get name {
     final p = tile.participant;
     final s = strings;
     var name = p.isLocal ? '${p.name}${s[TeleStringKey.youSuffix]}' : p.name;
     if (tile.screen) name += s[TeleStringKey.screenSuffix];
-    if (!tile.screen && !p.microphoneEnabled) name += s[TeleStringKey.mutedSuffix];
     return name;
   }
+
+  String get label =>
+      !tile.screen && !tile.participant.microphoneEnabled ? '$name${strings[TeleStringKey.mutedSuffix]}' : name;
 
   @override
   Widget build(BuildContext context) {
     final t = TeleCallTheme.of(context);
     final p = tile.participant;
     final track = tile.screen ? p.screenShareTrack : p.cameraTrack;
-    final pinLabel = strings.format(pinned ? TeleStringKey.unpin : TeleStringKey.pin, {'name': p.name});
+    final pinName = tile.screen ? '${p.name}${strings[TeleStringKey.screenSuffix]}' : p.name;
+    final pinLabel = strings.format(pinned ? TeleStringKey.unpin : TeleStringKey.pin, {'name': pinName});
     return Semantics(
       container: true,
       label: label,
@@ -174,12 +182,7 @@ class TeleTileView extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              TeleVideo(
-                track: track,
-                name: p.name,
-                mirror: p.isLocal && !tile.screen,
-                contain: tile.screen,
-              ),
+              TeleVideo(track: track, name: p.name, mirror: p.isLocal && !tile.screen, contain: tile.screen),
               Positioned(
                 left: 8,
                 bottom: 8,
@@ -203,11 +206,7 @@ class TeleTileView extends StatelessWidget {
                               ),
                             Flexible(
                               child: ExcludeSemantics(
-                                child: Text(
-                                  label,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                                ),
+                                child: Text(label, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 13)),
                               ),
                             ),
                           ],
@@ -253,22 +252,36 @@ class TeleTileView extends StatelessWidget {
   }
 }
 
-/// The large tile with a strip, or an even grid.
-class TeleStageView extends StatelessWidget {
+/// The large tile with a strip, or an even grid. Rebuilds on [TeleCallController.media] only.
+///
+/// Each tile keeps one [GlobalKey] while it is in the call, so moving between the stage, the strip
+/// and the grid reparents its video renderer instead of recreating it (no black flash).
+class TeleStageView extends StatefulWidget {
   const TeleStageView({super.key, required this.controller, required this.strings});
   final TeleCallController controller;
   final TeleStrings strings;
 
   @override
-  Widget build(BuildContext context) {
+  State<TeleStageView> createState() => _TeleStageViewState();
+}
+
+class _TeleStageViewState extends State<TeleStageView> {
+  final _keys = <String, GlobalKey>{};
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(listenable: widget.controller.media, builder: _build);
+
+  Widget _build(BuildContext context, Widget? _) {
+    final controller = widget.controller;
     final stage = controller.stage;
     final speaking = controller.participants.where((p) => p.isSpeaking).map((p) => p.identity).toSet();
     final all = [?stage.focus, ...stage.rest];
+    _keys.removeWhere((k, _) => !all.any((t) => t.key == k));
     final canPin = all.length > 1;
     Widget tile(TeleTile t) => TeleTileView(
-          key: ValueKey(t.key),
+          key: _keys.putIfAbsent(t.key, () => GlobalKey(debugLabel: t.key)),
           tile: t,
-          strings: strings,
+          strings: widget.strings,
           pinned: controller.pinned == t.key,
           speaking: !t.screen && speaking.contains(t.participant.identity),
           canPin: canPin,
@@ -279,18 +292,30 @@ class TeleStageView extends StatelessWidget {
       const gap = 8.0;
       final focus = stage.focus;
       if (focus != null) {
-        final wide = box.maxWidth >= 900;
-        final strip = ListView.separated(
+        final wide = box.maxWidth >= 900 || box.maxWidth > box.maxHeight * 1.6;
+        final stripExtent = wide ? (box.maxWidth * 0.22).clamp(120.0, 260.0) : (box.maxHeight * 0.22).clamp(72.0, 120.0);
+        // A plain scrollable row/column (not a lazy list) so each tile's state survives moves.
+        final strip = SingleChildScrollView(
           scrollDirection: wide ? Axis.vertical : Axis.horizontal,
-          itemCount: stage.rest.length,
-          separatorBuilder: (_, _) => const SizedBox.square(dimension: gap),
-          itemBuilder: (_, i) => AspectRatio(aspectRatio: 16 / 10, child: tile(stage.rest[i])),
+          child: Flex(
+            direction: wide ? Axis.vertical : Axis.horizontal,
+            children: [
+              for (final (i, t) in stage.rest.indexed) ...[
+                if (i > 0) const SizedBox.square(dimension: gap),
+                SizedBox(
+                  width: wide ? stripExtent : stripExtent * 1.6,
+                  height: wide ? stripExtent / 1.6 : stripExtent,
+                  child: tile(t),
+                ),
+              ],
+            ],
+          ),
         );
         final children = <Widget>[
           Expanded(child: tile(focus)),
           if (stage.rest.isNotEmpty) ...[
             const SizedBox.square(dimension: gap),
-            SizedBox(width: wide ? 260 : null, height: wide ? null : 120, child: strip),
+            SizedBox(width: wide ? stripExtent : null, height: wide ? null : stripExtent, child: strip),
           ],
         ];
         return wide ? Row(children: children) : Column(children: children);
@@ -325,7 +350,8 @@ class TeleStageView extends StatelessWidget {
   }
 }
 
-/// Dropdowns for microphone, camera and (where the platform allows) speaker.
+/// Dropdowns for microphone, camera and (where the platform allows) speaker. The list refreshes
+/// when devices change or become readable after a permission.
 class TeleDevicePickers extends StatefulWidget {
   const TeleDevicePickers({super.key, required this.controller, required this.strings});
   final TeleCallController controller;
@@ -337,11 +363,19 @@ class TeleDevicePickers extends StatefulWidget {
 
 class _TeleDevicePickersState extends State<TeleDevicePickers> {
   List<TeleMediaDevice> _devices = const [];
+  StreamSubscription<CallEngineEvent>? _sub;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _sub = widget.controller.engine.events.where((e) => e is CallEngineDevicesChanged).listen((_) => _load());
+  }
+
+  @override
+  void dispose() {
+    unawaited(_sub?.cancel());
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -370,6 +404,7 @@ class _TeleDevicePickersState extends State<TeleDevicePickers> {
       pickers.add(Padding(
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: DropdownButtonFormField<TeleMediaDevice>(
+          key: ValueKey('$kind:${list.length}:${selected.id}'),
           initialValue: selected,
           isExpanded: true,
           decoration: InputDecoration(
@@ -394,6 +429,16 @@ class _TeleDevicePickersState extends State<TeleDevicePickers> {
   }
 }
 
+/// Limits text to [max] Unicode code points, the way the Tele server counts message length.
+class _CodePointLimit extends TextInputFormatter {
+  const _CodePointLimit(this.max);
+  final int max;
+
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) =>
+      newValue.text.runes.length <= max ? newValue : oldValue;
+}
+
 /// The chat panel: history, live messages and an input.
 class TeleChatPanel extends StatefulWidget {
   const TeleChatPanel({super.key, required this.controller, required this.strings, this.onClose});
@@ -408,6 +453,8 @@ class TeleChatPanel extends StatefulWidget {
 class _TeleChatPanelState extends State<TeleChatPanel> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  int _shown = 0;
+  bool _first = true;
 
   @override
   void dispose() {
@@ -419,18 +466,29 @@ class _TeleChatPanelState extends State<TeleChatPanel> {
   Future<void> _send() async {
     final text = _input.text;
     if (text.trim().isEmpty) return;
-    _input.clear();
-    await widget.controller.sendChat(text);
+    // Keep the draft until it is sent; a failed send shows a notice and leaves it in the box.
+    if (await widget.controller.sendChat(text) && mounted && _input.text == text) _input.clear();
   }
+
+  bool get _nearBottom => !_scroll.hasClients || _scroll.position.maxScrollExtent - _scroll.position.pixels < 80;
 
   @override
   Widget build(BuildContext context) {
     final t = TeleCallTheme.of(context);
     final s = widget.strings;
     final messages = widget.controller.messages;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
-    });
+    // Follow new messages only when they arrive and the reader is already at the bottom (or they
+    // are your own); scrolling up to read earlier messages isn't interrupted.
+    if (messages.length > _shown) {
+      final follow = _first || _nearBottom || messages.last.mine;
+      _shown = messages.length;
+      _first = false;
+      if (follow) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        });
+      }
+    }
     return Material(
       color: t.surface,
       child: Column(
@@ -459,7 +517,7 @@ class _TeleChatPanelState extends State<TeleChatPanel> {
           Expanded(
             child: messages.isEmpty
                 ? Center(
-                    child: Padding(
+                    child: SingleChildScrollView(
                       padding: const EdgeInsets.all(24),
                       child: Text(s[TeleStringKey.chatEmpty], textAlign: TextAlign.center, style: TextStyle(color: t.muted)),
                     ),
@@ -479,7 +537,7 @@ class _TeleChatPanelState extends State<TeleChatPanel> {
                 Expanded(
                   child: TextField(
                     controller: _input,
-                    maxLength: 4000,
+                    inputFormatters: const [_CodePointLimit(teleChatMaxLength)],
                     minLines: 1,
                     maxLines: 4,
                     textInputAction: TextInputAction.send,
@@ -487,7 +545,6 @@ class _TeleChatPanelState extends State<TeleChatPanel> {
                     style: TextStyle(color: t.text),
                     decoration: InputDecoration(
                       hintText: s[TeleStringKey.message],
-                      counterText: '',
                       isDense: true,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(t.radius)),
                     ),
@@ -553,41 +610,62 @@ class _Bubble extends StatelessWidget {
 
 /// A one-line banner (recording, reconnecting, device problems).
 class TeleBanner extends StatelessWidget {
-  const TeleBanner({super.key, required this.text, required this.icon, this.color, this.onDismiss, this.dismissLabel});
+  const TeleBanner({
+    super.key,
+    required this.text,
+    required this.icon,
+    this.color,
+    this.onDismiss,
+    this.dismissLabel,
+    this.onTap,
+  });
   final String text;
   final IconData icon;
   final Color? color;
   final VoidCallback? onDismiss;
   final String? dismissLabel;
 
+  /// Makes the whole banner a button (for example "Tap to turn on call audio").
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final t = TeleCallTheme.of(context);
     final c = color ?? t.text;
+    final body = Container(
+      constraints: const BoxConstraints(minHeight: 40),
+      padding: EdgeInsets.only(left: 12, right: onDismiss == null ? 12 : 0),
+      decoration: BoxDecoration(
+        color: Color.alphaBlend(c.withValues(alpha: 0.14), t.surface),
+        borderRadius: BorderRadius.circular(t.radius / 2),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: c),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: t.text))),
+          if (onDismiss != null)
+            IconButton(
+              tooltip: dismissLabel,
+              constraints: const BoxConstraints(minWidth: teleMinTarget, minHeight: teleMinTarget),
+              icon: Icon(Icons.close, size: 18, color: t.muted),
+              onPressed: onDismiss,
+            ),
+        ],
+      ),
+    );
     return Semantics(
       liveRegion: true,
       container: true,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-        padding: EdgeInsets.fromLTRB(12, onDismiss == null ? 10 : 0, 0, onDismiss == null ? 10 : 0),
-        decoration: BoxDecoration(
-          color: c.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(t.radius / 2),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: c),
-            const SizedBox(width: 8),
-            Expanded(child: Text(text, style: TextStyle(color: t.text))),
-            if (onDismiss != null)
-              IconButton(
-                tooltip: dismissLabel,
-                constraints: const BoxConstraints(minWidth: teleMinTarget, minHeight: teleMinTarget),
-                icon: Icon(Icons.close, size: 18, color: t.muted),
-                onPressed: onDismiss,
+      button: onTap != null,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: onTap == null
+            ? body
+            : Material(
+                color: Colors.transparent,
+                child: InkWell(onTap: onTap, borderRadius: BorderRadius.circular(t.radius / 2), child: body),
               ),
-          ],
-        ),
       ),
     );
   }

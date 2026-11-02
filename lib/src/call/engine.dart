@@ -5,6 +5,9 @@ import '../api/models.dart';
 /// The media connection as [TeleCallController] sees it. [LiveKitCallEngine] is the real one; tests
 /// use a fake. Everything LiveKit-specific stays behind this interface except [VideoTrack], which the
 /// call screen hands to `VideoTrackRenderer`.
+///
+/// **Experimental:** this interface may gain members in minor releases. Implement it for tests; for
+/// production use [LiveKitCallEngine].
 abstract class CallEngine {
   /// Room events. A broadcast stream that stays open across [connect] calls.
   Stream<CallEngineEvent> get events;
@@ -30,6 +33,12 @@ abstract class CallEngine {
   bool get canFlipCamera;
   bool get canShareScreen;
 
+  /// False when the browser blocked autoplay; call [startAudio] from a user gesture.
+  bool get canPlaybackAudio;
+
+  /// Starts audio playback after a user gesture (web autoplay policy).
+  Future<void> startAudio();
+
   /// The lobby's camera preview, before connecting.
   VideoTrack? get previewTrack;
 
@@ -44,6 +53,7 @@ abstract class CallEngine {
 
   /// Connects with a join response. Media is published after connecting, as requested; failures
   /// to publish are reported as [CallEngineMediaError] events instead of failing the connect.
+  /// A [disconnect] while connecting cancels it: the call returns without a connected room.
   Future<void> connect(TeleJoinResponse join, {required bool microphone, required bool camera});
 
   /// Leaves the room. Emits no [CallEngineDisconnected] for this disconnect.
@@ -110,7 +120,7 @@ class CallParticipant {
   final VideoTrack? cameraTrack;
   final VideoTrack? screenShareTrack;
 
-  /// Set when the participant shares a screen, even before the track is subscribed.
+  /// Set when a screen share can be shown: for others, once its track is subscribed.
   final bool hasScreenShare;
 }
 
@@ -177,6 +187,17 @@ class CallEngineChat extends CallEngineEvent {
   final String streamId;
   final String identity;
   final String body;
+}
+
+/// Whether audio can play (web autoplay policy).
+class CallEngineAudioPlayback extends CallEngineEvent {
+  const CallEngineAudioPlayback(this.canPlay);
+  final bool canPlay;
+}
+
+/// The list of microphones, cameras or speakers changed (or became readable after a permission).
+class CallEngineDevicesChanged extends CallEngineEvent {
+  const CallEngineDevicesChanged();
 }
 
 enum CallMediaSource { microphone, camera }

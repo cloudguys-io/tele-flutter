@@ -12,12 +12,12 @@ const teleChatTopic = 'lk.chat';
 /// Maps the join response's `ice_servers` into the SDK's RTC configuration.
 ///
 /// Tele's TURN servers replace the SDK defaults and are passed as is (they already include STUN).
-/// When `ice_servers` is null, no servers are passed and the SDK uses its defaults.
+/// When `ice_servers` is null or empty, no servers are passed and the SDK uses its defaults.
 RTCConfiguration rtcConfigurationFor(TeleJoinResponse join) {
   final ice = join.iceServers
       ?.map((s) => RTCIceServer(urls: s.urls, username: s.username, credential: s.credential))
       .toList();
-  return ice == null ? const RTCConfiguration() : RTCConfiguration(iceServers: ice);
+  return ice == null || ice.isEmpty ? const RTCConfiguration() : RTCConfiguration(iceServers: ice);
 }
 
 /// Maps the SDK's disconnect reason onto what the call screen shows. Returns null for a disconnect
@@ -36,12 +36,15 @@ bool get _isMobile =>
 
 /// [CallEngine] on `livekit_client`. Each [connect] builds a new [Room], so a rejoin starts clean.
 class LiveKitCallEngine implements CallEngine {
-  LiveKitCallEngine({this.roomOptions = const RoomOptions(adaptiveStream: true, dynacast: true)});
+  LiveKitCallEngine({this.roomOptions = const RoomOptions(adaptiveStream: true, dynacast: true)}) {
+    _deviceSub = Hardware.instance.onDeviceChange.stream.listen((_) => _emit(const CallEngineDevicesChanged()));
+  }
 
   /// The base room options. Selected devices are layered on top.
   final RoomOptions roomOptions;
 
   final _events = StreamController<CallEngineEvent>.broadcast();
+  StreamSubscription<List<MediaDevice>>? _deviceSub;
   Room? _room;
   EventsListener<RoomEvent>? _listener;
   LocalVideoTrack? _preview;
@@ -51,6 +54,9 @@ class LiveKitCallEngine implements CallEngine {
   bool _speakerphone = true;
   bool _leaving = false;
   bool _previewWanted = false;
+
+  /// Bumped by every [connect] and [disconnect]; a connect whose generation is stale was cancelled.
+  int _generation = 0;
 
   @override
   Stream<CallEngineEvent> get events => _events.stream;
@@ -78,17 +84,19 @@ class LiveKitCallEngine implements CallEngine {
       return pub != null && !pub.muted && t is VideoTrack ? t : null;
     }
 
+    final screen = video(TrackSource.screenShareVideo);
     return CallParticipant(
       identity: p.identity,
-      name: p.name.isNotEmpty ? p.name : (p.attributes['user_id'] ?? p.identity),
+      name: _name(p),
       userId: p.attributes['user_id'] ?? p.identity,
       isLocal: local,
       isSpeaking: p.isSpeaking,
       microphoneEnabled: p.isMicrophoneEnabled(),
       cameraEnabled: p.isCameraEnabled(),
       cameraTrack: video(TrackSource.camera),
-      screenShareTrack: video(TrackSource.screenShareVideo),
-      hasScreenShare: p.isScreenShareEnabled(),
+      screenShareTrack: screen,
+      // Others' screen shares get a tile once the track is subscribed, as in the web call UI.
+      hasScreenShare: local ? p.isScreenShareEnabled() : screen != null,
     );
   }
 
@@ -121,6 +129,15 @@ class LiveKitCallEngine implements CallEngine {
   bool get canShareScreen => !_isMobile;
 
   @override
+  bool get canPlaybackAudio => _room?.canPlaybackAudio ?? true;
+
+  @override
+  Future<void> startAudio() async {
+    await _room?.startAudio();
+    _emit(CallEngineAudioPlayback(canPlaybackAudio));
+  }
+
+  @override
   VideoTrack? get previewTrack => _preview;
 
   CameraCaptureOptions get _cameraOptions => CameraCaptureOptions(deviceId: _videoInputId, cameraPosition: _position);
@@ -143,6 +160,8 @@ class LiveKitCallEngine implements CallEngine {
     }
     _preview = track;
     _emit(const CallEngineChanged());
+    // Labels and device ids are only readable once a permission was granted.
+    _emit(const CallEngineDevicesChanged());
   }
 
   @override
@@ -195,6 +214,7 @@ class LiveKitCallEngine implements CallEngine {
   @override
   Future<void> connect(TeleJoinResponse join, {required bool microphone, required bool camera}) async {
     await _closeRoom();
+    final gen = ++_generation;
     _leaving = false;
     final room = Room(
       roomOptions: roomOptions.copyWith(
@@ -204,31 +224,54 @@ class LiveKitCallEngine implements CallEngine {
     );
     _room = room;
     _listen(room);
+    // The lobby's preview track is handed over to the room (published), or stopped.
+    final preview = _preview;
+    _preview = null;
+    bool cancelled() => gen != _generation || _room != room;
+
     try {
       await room.connect(join.wsUrl, join.token, connectOptions: ConnectOptions(rtcConfiguration: rtcConfigurationFor(join)));
     } catch (_) {
-      await _closeRoom();
+      await preview?.stop();
+      if (!cancelled()) await _closeRoom();
       rethrow;
+    }
+    if (cancelled()) {
+      await preview?.stop();
+      await room.disconnect().catchError((_) {});
+      return;
     }
     if (_isMobile) await AudioManager.instance.setSpeakerOutputPreferred(_speakerphone).catchError((_) {});
 
     final lp = room.localParticipant!;
     if (microphone) {
-      await lp.setMicrophoneEnabled(true).then<void>((_) {}, onError: (Object e) {
+      try {
+        await lp.setMicrophoneEnabled(true);
+      } catch (e) {
         _emit(CallEngineMediaError(CallMediaSource.microphone, e));
-      });
+      }
+      if (cancelled()) {
+        await preview?.stop();
+        return;
+      }
     }
-    final preview = _preview;
-    _preview = null;
     if (camera) {
-      // Publish the lobby's preview track so the camera isn't opened twice.
-      final publish = preview != null ? lp.publishVideoTrack(preview) : lp.setCameraEnabled(true);
-      await publish.then<void>((_) {}, onError: (Object e) {
+      try {
+        // Publish the lobby's preview so the camera isn't opened twice.
+        if (preview != null) {
+          await lp.publishVideoTrack(preview);
+        } else {
+          await lp.setCameraEnabled(true);
+        }
+      } catch (e) {
+        await preview?.stop();
         _emit(CallEngineMediaError(CallMediaSource.camera, e));
-      });
+      }
     } else {
       await preview?.stop();
     }
+    if (cancelled()) return;
+    _emit(CallEngineAudioPlayback(room.canPlaybackAudio));
     _emit(const CallEngineChanged());
   }
 
@@ -248,6 +291,7 @@ class LiveKitCallEngine implements CallEngine {
       ..on<ActiveSpeakersChangedEvent>(changed)
       ..on<ParticipantNameUpdatedEvent>(changed)
       ..on<ParticipantAttributesChanged>(changed)
+      ..on<AudioPlaybackStatusChanged>((e) => _emit(CallEngineAudioPlayback(e.isPlaying)))
       ..on<RoomRecordingStatusChanged>((e) => _emit(CallEngineRecordingChanged(e.activeRecording)))
       ..on<RoomReconnectingEvent>((_) => _emit(const CallEngineReconnecting()))
       ..on<RoomReconnectedEvent>((_) => _emit(const CallEngineReconnected()))
@@ -284,7 +328,10 @@ class LiveKitCallEngine implements CallEngine {
   }
 
   @override
-  Future<void> disconnect() => _closeRoom();
+  Future<void> disconnect() {
+    _generation++;
+    return _closeRoom();
+  }
 
   LocalParticipant get _lp {
     final lp = _room?.localParticipant;
@@ -333,8 +380,9 @@ class LiveKitCallEngine implements CallEngine {
 
   @override
   Future<void> dispose() async {
-    await _closeRoom();
+    await disconnect();
     await setPreviewCamera(false);
+    await _deviceSub?.cancel();
     await _events.close();
   }
 }

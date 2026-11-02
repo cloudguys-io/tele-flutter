@@ -20,6 +20,10 @@ enum TeleCallPhase { lobby, joining, live, ended, error, left }
 /// Why the local user is no longer in the call.
 enum TeleEndReason { left, roomDeleted, duplicateIdentity, removed, joinFailure, disconnected, error }
 
+/// The longest chat message the screen sends, in Unicode code points (as the server counts).
+/// Matches the web call UI; Tele itself records up to 4,000.
+const teleChatMaxLength = 2000;
+
 /// A chat message on the screen. [id] is the text stream id, which is also the saved message's
 /// `stream_id`, so live messages and history are deduplicated on it.
 class TeleChatEntry {
@@ -90,17 +94,30 @@ class TeleCallFailed extends TeleCallEvent {
   String? get code => error is TeleException ? (error as TeleException).code : null;
 }
 
+/// Error codes after which a fresh join can't succeed.
+const _finalJoinCodes = {
+  'call_ended', 'call_cancelled', 'too_late', 'not_invited', 'invite_expired', 'invite_revoked',
+  'invite_exhausted', 'invite_not_found', 'forbidden', 'not_found',
+};
+
 /// Runs one call: lobby, connect, media toggles, stage, chat, recording, reconnects.
 ///
 /// [join] returns a join response, from [TeleClient.joinInvite], [TeleClient.joinCall] or your
-/// backend. It is called again for a fresh join when the media SDK gives up reconnecting.
+/// backend. When the media SDK gives up reconnecting, the controller joins again with [rejoin]
+/// (given the call id). By default that is [TeleClient.joinCall] when [client] is set, so a rejoin
+/// doesn't use up another use of an invite; without a client it is [join].
+///
 /// [client] is optional: with it the controller loads chat history, saves sent messages, and lets
 /// hosts record and end the call.
+///
+/// The controller disposes [engine] only when it created it, or when [ownsEngine] is true.
 class TeleCallController extends ChangeNotifier {
   TeleCallController({
     required Future<TeleJoinResponse> Function() join,
+    Future<TeleJoinResponse> Function(String callId)? rejoin,
     this.client,
     CallEngine? engine,
+    bool? ownsEngine,
     TeleLayout layout = TeleLayout.grid,
     this.persistChat = true,
     this.loadChatHistory = true,
@@ -111,7 +128,9 @@ class TeleCallController extends ChangeNotifier {
     bool microphone = true,
     bool camera = true,
   })  : _joiner = join,
+        _rejoiner = rejoin ?? (client != null ? client.joinCall : (_) => join()),
         _engine = engine ?? LiveKitCallEngine(),
+        _ownsEngine = ownsEngine ?? engine == null,
         _layout = layout,
         _endForAll = endForAll,
         _setRecording = setRecording,
@@ -120,13 +139,65 @@ class TeleCallController extends ChangeNotifier {
     _sub = _engine.events.listen(_onEngine);
   }
 
-  /// Joins through an invite code.
-  factory TeleCallController.invite(TeleClient client, String code, {CallEngine? engine, TeleLayout layout = TeleLayout.grid}) =>
-      TeleCallController(join: () => client.joinInvite(code), client: client, engine: engine, layout: layout);
+  /// Joins through an invite code. Rejoins use the call id, so they don't use up the invite.
+  factory TeleCallController.invite(
+    TeleClient client,
+    String code, {
+    CallEngine? engine,
+    bool? ownsEngine,
+    TeleLayout layout = TeleLayout.grid,
+    bool microphone = true,
+    bool camera = true,
+    bool persistChat = true,
+    bool loadChatHistory = true,
+    int maxRejoinAttempts = 2,
+    Future<void> Function()? endForAll,
+    Future<void> Function(bool on)? setRecording,
+  }) =>
+      TeleCallController(
+        join: () => client.joinInvite(code),
+        client: client,
+        engine: engine,
+        ownsEngine: ownsEngine,
+        layout: layout,
+        microphone: microphone,
+        camera: camera,
+        persistChat: persistChat,
+        loadChatHistory: loadChatHistory,
+        maxRejoinAttempts: maxRejoinAttempts,
+        endForAll: endForAll,
+        setRecording: setRecording,
+      );
 
   /// Joins a call the user is a member of.
-  factory TeleCallController.call(TeleClient client, String callId, {CallEngine? engine, TeleLayout layout = TeleLayout.grid}) =>
-      TeleCallController(join: () => client.joinCall(callId), client: client, engine: engine, layout: layout);
+  factory TeleCallController.call(
+    TeleClient client,
+    String callId, {
+    CallEngine? engine,
+    bool? ownsEngine,
+    TeleLayout layout = TeleLayout.grid,
+    bool microphone = true,
+    bool camera = true,
+    bool persistChat = true,
+    bool loadChatHistory = true,
+    int maxRejoinAttempts = 2,
+    Future<void> Function()? endForAll,
+    Future<void> Function(bool on)? setRecording,
+  }) =>
+      TeleCallController(
+        join: () => client.joinCall(callId),
+        client: client,
+        engine: engine,
+        ownsEngine: ownsEngine,
+        layout: layout,
+        microphone: microphone,
+        camera: camera,
+        persistChat: persistChat,
+        loadChatHistory: loadChatHistory,
+        maxRejoinAttempts: maxRejoinAttempts,
+        endForAll: endForAll,
+        setRecording: setRecording,
+      );
 
   final TeleClient? client;
 
@@ -141,11 +212,14 @@ class TeleCallController extends ChangeNotifier {
   final Duration rejoinDelay;
 
   final Future<TeleJoinResponse> Function() _joiner;
+  final Future<TeleJoinResponse> Function(String callId) _rejoiner;
   final CallEngine _engine;
+  final bool _ownsEngine;
   final Future<void> Function()? _endForAll;
   final Future<void> Function(bool on)? _setRecording;
   late final StreamSubscription<CallEngineEvent> _sub;
   final _events = StreamController<TeleCallEvent>.broadcast();
+  final _media = _Notifier();
 
   TeleCallPhase _phase = TeleCallPhase.lobby;
   TeleJoinResponse? _join;
@@ -159,6 +233,7 @@ class TeleCallController extends ChangeNotifier {
   bool _recordingBusy = false;
   bool _disposed = false;
   bool _chatOpen = false;
+  bool _needsAudio = false;
   int _unread = 0;
   String? _pinned;
   TeleLayout _layout;
@@ -166,6 +241,10 @@ class TeleCallController extends ChangeNotifier {
   final Set<String> _seen = {};
 
   CallEngine get engine => _engine;
+
+  /// Notifies when only media changed: tracks, mutes, speakers, participants, pins. The screen
+  /// rebuilds just the stage for these; [addListener] covers everything else (and media too).
+  Listenable get media => _media;
 
   /// Call events: joined, participants, new chat messages, left, failed.
   Stream<TeleCallEvent> get events => _events.stream;
@@ -185,6 +264,9 @@ class TeleCallController extends ChangeNotifier {
   bool get reconnecting =>
       _sdkReconnecting || _rejoining || _engine.connectionState == TeleConnectionState.reconnecting;
 
+  /// True when the browser blocked audio playback; call [startAudio] from a tap.
+  bool get needsAudioStart => _needsAudio && _phase == TeleCallPhase.live;
+
   bool get microphoneEnabled => _phase == TeleCallPhase.live ? _engine.microphoneEnabled : _micWanted;
   bool get cameraEnabled => _phase == TeleCallPhase.live ? _engine.cameraEnabled : _camWanted;
   bool get screenShareEnabled => _engine.screenShareEnabled;
@@ -194,35 +276,36 @@ class TeleCallController extends ChangeNotifier {
   bool get canRecord => isHost && (_setRecording != null || client != null);
   bool get canEndForAll => isHost && (_endForAll != null || client != null);
 
-  List<CallParticipant> get participants => _engine.participants;
-  int get participantCount => _engine.participants.length;
+  /// Everyone in the room, you first. Empty while rejoining.
+  List<CallParticipant> get participants => _rejoining ? const [] : _engine.participants;
+  int get participantCount => participants.length;
 
   TeleLayout get layout => _layout;
   set layout(TeleLayout v) {
     if (v == _layout) return;
     _layout = v;
-    notifyListeners();
+    _changed();
   }
 
-  /// The tile key this viewer pinned. Pins are local and never sent to anyone.
+  /// The tile key this viewer pinned. Pins are local and never sent to anyone; a pin is dropped
+  /// when that participant leaves.
   String? get pinned => _pinned;
 
   void togglePinned(String key) {
     _pinned = togglePin(_pinned, key);
-    notifyListeners();
+    _media.notify();
   }
 
   /// The active speaker's camera tile key: the loudest remote speaker, else the loudest.
   String? get speakerKey {
     final speakers = _engine.activeSpeakers;
     if (speakers.isEmpty) return null;
-    final local = _engine.participants.where((p) => p.isLocal).map((p) => p.identity).firstOrNull;
+    final local = participants.where((p) => p.isLocal).map((p) => p.identity).firstOrNull;
     return tileKey(speakers.firstWhere((s) => s != local, orElse: () => speakers.first));
   }
 
   /// What goes large and what goes in the strip.
-  TeleStage get stage =>
-      arrangeStage(tilesFor(_engine.participants), layout: _layout, pinned: _pinned, speaker: speakerKey);
+  TeleStage get stage => arrangeStage(tilesFor(participants), layout: _layout, pinned: _pinned, speaker: speakerKey);
 
   List<TeleChatEntry> get messages => List.unmodifiable(_messages);
   int get unreadCount => _unread;
@@ -231,7 +314,7 @@ class TeleCallController extends ChangeNotifier {
     if (v == _chatOpen && (!v || _unread == 0)) return;
     _chatOpen = v;
     if (v) _unread = 0;
-    notifyListeners();
+    _changed();
   }
 
   void dismissNotice() => _setNotice(null);
@@ -243,7 +326,9 @@ class TeleCallController extends ChangeNotifier {
   }
 
   void _changed() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    notifyListeners();
+    _media.notify();
   }
 
   void _emit(TeleCallEvent e) {
@@ -258,6 +343,7 @@ class TeleCallController extends ChangeNotifier {
     try {
       await _engine.setPreviewCamera(true);
     } catch (_) {
+      if (_phase != TeleCallPhase.lobby) return;
       _camWanted = false;
       _setNotice(const TeleNotice(TeleStringKey.cameraUnavailable));
     }
@@ -270,6 +356,7 @@ class TeleCallController extends ChangeNotifier {
   Future<void> join() async {
     if (_phase != TeleCallPhase.lobby) return;
     _phase = TeleCallPhase.joining;
+    _notice = null;
     _changed();
     try {
       final j = await _joiner();
@@ -278,12 +365,14 @@ class TeleCallController extends ChangeNotifier {
       await _engine.connect(j, microphone: _micWanted, camera: _camWanted);
       if (_disposed || _phase != TeleCallPhase.joining) return;
       _phase = TeleCallPhase.live;
+      _needsAudio = !_engine.canPlaybackAudio;
       _changed();
       _emit(TeleCallJoined(j));
       unawaited(_loadHistory());
     } catch (e) {
       if (_disposed || _phase != TeleCallPhase.joining) return;
       await _engine.disconnect().catchError((_) {});
+      await _engine.setPreviewCamera(false).catchError((_) {});
       _error = e;
       _endReason = TeleEndReason.error;
       _phase = TeleCallPhase.error;
@@ -322,11 +411,16 @@ class TeleCallController extends ChangeNotifier {
     _emit(TeleCallLeft(reason));
   }
 
-  /// Hosts: ends the call for everyone, then leaves.
+  /// Hosts: ends the call for everyone, then leaves. On failure, shows a notice and stays.
   Future<void> endForAll() async {
     final id = call?.id;
     if (!canEndForAll || id == null) return;
-    await (_endForAll?.call() ?? client!.endCall(id));
+    try {
+      await (_endForAll?.call() ?? client!.endCall(id));
+    } catch (_) {
+      _setNotice(const TeleNotice(TeleStringKey.endForAllFailed));
+      return;
+    }
     await leave();
   }
 
@@ -349,6 +443,7 @@ class TeleCallController extends ChangeNotifier {
       if (_phase == TeleCallPhase.live) {
         await _engine.setCamera(on);
       } else if (_phase == TeleCallPhase.lobby) {
+        _changed();
         await _engine.setPreviewCamera(on);
       }
     } catch (_) {
@@ -381,6 +476,18 @@ class TeleCallController extends ChangeNotifier {
       await _engine.setScreenShare(on);
     } catch (_) {
       if (on) _setNotice(const TeleNotice(TeleStringKey.screenShareFailed));
+    }
+    _changed();
+  }
+
+  /// Starts audio playback after the browser blocked autoplay. Call it from a tap.
+  Future<void> startAudio() async {
+    try {
+      await _engine.startAudio();
+      _needsAudio = !_engine.canPlaybackAudio;
+      if (_needsAudio) _setNotice(const TeleNotice(TeleStringKey.audioBlocked));
+    } catch (_) {
+      _setNotice(const TeleNotice(TeleStringKey.audioBlocked));
     }
     _changed();
   }
@@ -422,14 +529,23 @@ class TeleCallController extends ChangeNotifier {
 
   // ---- chat ----
 
-  String get _localUserId => _engine.participants.where((p) => p.isLocal).map((p) => p.userId).firstOrNull ?? '';
+  String get _localUserId => participants.where((p) => p.isLocal).map((p) => p.userId).firstOrNull ?? '';
 
   /// Sends [text] on `lk.chat`, shows it, and (with [persistChat]) saves it to Tele.
-  Future<void> sendChat(String text) async {
+  ///
+  /// Returns false when nothing was sent (empty, too long, not live, or the send failed; a failure
+  /// also shows a notice), so the caller can keep the draft.
+  Future<bool> sendChat(String text) async {
     final body = text.trim();
-    if (body.isEmpty || _phase != TeleCallPhase.live) return;
-    final streamId = await _engine.sendChat(body);
-    final me = _engine.participants.where((p) => p.isLocal).firstOrNull;
+    if (body.isEmpty || body.runes.length > teleChatMaxLength || _phase != TeleCallPhase.live) return false;
+    final String streamId;
+    try {
+      streamId = await _engine.sendChat(body);
+    } catch (_) {
+      _setNotice(const TeleNotice(TeleStringKey.chatFailed));
+      return false;
+    }
+    final me = participants.where((p) => p.isLocal).firstOrNull;
     final sentAt = DateTime.now();
     _addChat(TeleChatEntry(
         id: streamId, userId: me?.userId ?? '', name: me?.name ?? '', body: body, mine: true, sentAt: sentAt));
@@ -437,6 +553,7 @@ class TeleCallController extends ChangeNotifier {
     if (persistChat && client != null && id != null) {
       unawaited(client!.postMessage(id, streamId: streamId, body: body, sentAt: sentAt).then<void>((_) {}, onError: (_) {}));
     }
+    return true;
   }
 
   bool _addChat(TeleChatEntry m, {bool announce = true}) {
@@ -475,9 +592,16 @@ class TeleCallController extends ChangeNotifier {
   // ---- engine events ----
 
   void _onEngine(CallEngineEvent e) {
+    if (_disposed) return;
     switch (e) {
       case CallEngineChanged():
+        _media.notify();
       case CallEngineRecordingChanged():
+        _changed();
+      case CallEngineDevicesChanged():
+        _changed();
+      case CallEngineAudioPlayback(:final canPlay):
+        _needsAudio = !canPlay;
         _changed();
       case CallEngineParticipantJoined(:final identity, :final name):
         _changed();
@@ -493,7 +617,7 @@ class TeleCallController extends ChangeNotifier {
         _sdkReconnecting = false;
         _changed();
       case CallEngineChat(:final streamId, :final identity, :final body):
-        final p = _engine.participants.where((p) => p.identity == identity).firstOrNull;
+        final p = participants.where((p) => p.identity == identity).firstOrNull;
         _addChat(TeleChatEntry(
             id: streamId, userId: p?.userId ?? identity, name: p?.name ?? identity, body: body, mine: false,
             sentAt: DateTime.now()));
@@ -527,17 +651,20 @@ class TeleCallController extends ChangeNotifier {
     }
   }
 
-  /// The SDK gave up: get a fresh token and a fresh join, and reconnect.
+  /// The SDK gave up: get a fresh token and a fresh join by call id, and reconnect.
   Future<void> _rejoin() async {
-    if (maxRejoinAttempts <= 0) return _end(TeleEndReason.disconnected);
+    final callId = call?.id;
+    if (maxRejoinAttempts <= 0 || callId == null) return _end(TeleEndReason.disconnected);
     _rejoining = true;
     _changed();
+    // Drop the dead room so its participants don't linger on the stage.
+    await _engine.disconnect().catchError((_) {});
     for (var attempt = 1; attempt <= maxRejoinAttempts; attempt++) {
       if (attempt > 1 || rejoinDelay > Duration.zero) await Future<void>.delayed(rejoinDelay * attempt);
       if (_disposed || _phase != TeleCallPhase.live) return;
       try {
         client?.invalidateToken();
-        final j = await _joiner();
+        final j = await _rejoiner(callId);
         if (_disposed || _phase != TeleCallPhase.live) return;
         _join = j;
         await _engine.connect(j, microphone: _micWanted, camera: _camWanted);
@@ -547,9 +674,10 @@ class TeleCallController extends ChangeNotifier {
         unawaited(_loadHistory());
         return;
       } on TeleException catch (e) {
-        if (e.code == 'call_ended' || e.code == 'call_cancelled' || e.code == 'too_late') {
+        if (_finalJoinCodes.contains(e.code)) {
           _rejoining = false;
-          return _end(TeleEndReason.roomDeleted);
+          final ended = e.code == 'call_ended' || e.code == 'call_cancelled' || e.code == 'too_late';
+          return _end(ended ? TeleEndReason.roomDeleted : TeleEndReason.disconnected);
         }
       } catch (_) {
         // try again
@@ -571,8 +699,27 @@ class TeleCallController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     unawaited(_sub.cancel());
-    unawaited(_engine.dispose().catchError((_) {}));
+    if (_ownsEngine) {
+      unawaited(_engine.dispose().catchError((_) {}));
+    } else {
+      unawaited(_engine.disconnect().catchError((_) {}));
+      unawaited(_engine.setPreviewCamera(false).catchError((_) {}));
+    }
     unawaited(_events.close());
+    _media.dispose();
+    super.dispose();
+  }
+}
+
+class _Notifier extends ChangeNotifier {
+  bool _gone = false;
+  void notify() {
+    if (!_gone) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _gone = true;
     super.dispose();
   }
 }
