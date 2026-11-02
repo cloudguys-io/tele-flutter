@@ -24,7 +24,8 @@ dependencies:
       ref: v0.1.0
 ```
 
-It depends on `livekit_client` ^2.13.1 (2.12.0 or later is required for Bangla and emoji chat) and `http`.
+It needs Dart 3.10 and Flutter 3.38 or later, and depends on `livekit_client` ^2.13.1 (2.12.0 or
+later is required for Bangla and emoji chat) and `http`.
 
 ### Platform setup
 
@@ -123,8 +124,14 @@ final tele = TeleClient(
 ```
 
 The client keeps the last token, asks for a new one 30 seconds before it expires, and on a `401`
-gets a fresh one and retries the request once. `invalidateToken()` forgets it. The platform is
-detected as `web`, `ios`, `android`, `macos`, `windows` or `linux`.
+gets a fresh one and retries the request once. `invalidateToken()` forgets it. A token provider that
+throws becomes a `TeleException` with code `token_provider`; a request slower than `timeout`
+(default 20 s) one with code `timeout`. The platform is sent as `flutter-web`, `flutter-ios`,
+`flutter-android`, `flutter-macos`, `flutter-windows` or `flutter-linux`, so the call record shows
+the SDK; pass `platform:` to override it.
+
+Recording downloads (`GET /v1/recordings/{id}/download`) are not wrapped: stream them through your
+backend.
 
 | Method | Endpoint |
 |---|---|
@@ -173,7 +180,8 @@ try {
 }
 ```
 
-A response that isn't a Tele error body becomes `http_<status>`.
+A response that isn't a Tele error body becomes `http_<status>`; no response is `network_error` or
+`timeout`; a failing token provider is `token_provider`.
 
 ### Joining through your backend
 
@@ -222,14 +230,19 @@ What it does:
 - **Stage:** what goes large, in order: a tile you pinned (every tile has a pin button, and a double
   tap pins too; pinning again unpins), then someone else's screen share (your own stays small unless
   you pin it), then the active speaker in speaker layout. The other tiles sit in a strip below, or
-  beside it once the screen is 900 px wide. Pins are local and never sent to anyone. Grid and
-  speaker layouts switch from the control bar.
+  beside it once the screen is 900 px wide. Pins are local and never sent to anyone, and a pin is
+  dropped when that person leaves. Others' screen shares get a tile once the track is subscribed.
+  Tiles keep their video renderer when they move, so the video doesn't flash. Grid and speaker
+  layouts switch from the control bar.
 - **Controls:** mute, camera, flip camera (phones), speakerphone (phones), share screen (web and
   desktop), layout, devices, chat with an unread badge, record and stop (hosts), end for all
   (hosts, with a confirmation), leave.
 - **Chat** on the `lk.chat` text stream topic, so it talks to web and native Tele clients. Earlier
   messages load from Tele when you join, deduplicated against live messages by `stream_id`. Sent
-  messages are also saved with `POST /v1/calls/{id}/messages`.
+  messages are also saved with `POST /v1/calls/{id}/messages`. Messages are limited to 2,000
+  characters (Unicode code points, as the server counts), like the web call UI. A failed send keeps
+  the draft and shows a notice.
+- **Audio on the web:** if the browser blocks autoplay, a banner asks for a tap to turn on call audio.
 - **Notices:** a recording banner while the media server reports recording, "Reconnecting..." while
   the SDK reconnects or the screen rejoins, and device problems.
 - **Ended and error screens** with the reason, Rejoin or Try again, and Close.
@@ -274,7 +287,9 @@ final call = TeleCallController(
 );
 ```
 
-`TeleCallController.invite(tele, code)` and `TeleCallController.call(tele, callId)` are shortcuts.
+`TeleCallController.invite(tele, code)` and `TeleCallController.call(tele, callId)` are shortcuts
+and take the same options (`microphone`, `camera`, `persistChat`, `loadChatHistory`,
+`maxRejoinAttempts`, `endForAll`, `setRecording`, `engine`, `ownsEngine`, `layout`).
 
 It is a `ChangeNotifier` with `phase` (`lobby`, `joining`, `live`, `ended`, `error`, `left`),
 `joinResponse`, `isHost`, `error`/`errorCode`, `endReason`, `notice`, `reconnecting`,
@@ -286,17 +301,23 @@ It is a `ChangeNotifier` with `phase` (`lobby`, `joining`, `live`, `ended`, `err
 
 How it connects (as in the guide's Flutter page): `ws_url` and `token` go to `Room.connect`;
 `ice_servers` become `ConnectOptions(rtcConfiguration: RTCConfiguration(iceServers: ...))`, passed as
-is; when `ice_servers` is null, the SDK's defaults are used. `rtcConfigurationFor(join)` is the
+is; when `ice_servers` is null or empty, no servers are passed and the SDK's defaults are used. `rtcConfigurationFor(join)` is the
 mapping, if you connect a `Room` yourself.
 
-**Reconnects:** the SDK reconnects after network blips. When it gives up (for example after a long
-outage, once the TURN credentials have expired), the controller drops the cached token, calls `join`
-again for a fresh join response and reconnects, up to `maxRejoinAttempts` times. If the call ended
-meanwhile it shows "The call has ended." A second device joining as the same user disconnects this
-one with `duplicateIdentity` ("You joined this call from another device").
+**Reconnects (automatic rejoin):** the SDK reconnects after network blips. When it gives up (for
+example after a long outage, once the TURN credentials have expired), the controller drops the dead
+room and the cached token, joins again and reconnects, up to `maxRejoinAttempts` times (0 turns
+this off). The rejoin uses `rejoin:` (given the call id), which defaults to `client.joinCall`, so
+a call opened from an invite doesn't use up another of the invite's uses. Without a client it calls
+`join` again. If the call ended, or the user may no longer join (`not_invited`, `invite_*`), it stops
+and shows the ended screen. A second device joining as the same user disconnects this one with
+`duplicateIdentity` ("You joined this call from another device").
 
-The media side is behind the `CallEngine` interface. `LiveKitCallEngine` is the real one; pass your
-own `engine:` to fake it in tests.
+The media side is behind the `CallEngine` interface (experimental: it may gain members in minor
+releases). `LiveKitCallEngine` is the real one; pass your own `engine:` to fake it in tests. The
+controller disposes an engine it created; a caller-supplied engine is only disconnected unless you
+pass `ownsEngine: true`. `controller.media` is a `Listenable` for media-only changes (tracks,
+speakers, pins), which the stage listens to so speaker changes don't rebuild the whole screen.
 
 ## Example
 
@@ -320,6 +341,19 @@ flutter test                    # unit, controller and widget tests; live API te
 export TELE_API_URL=http://127.0.0.1:8080 TELE_API_KEY=... TELE_API_SECRET=...
 flutter test test/integration
 ```
+
+### End-to-end test
+
+`tool/e2e/` drives the web example in two Chrome contexts (host and guest) with fake camera and
+microphone against a live Tele API and LiveKit: lobby preview, both video tiles, chat both ways and
+saved, pinning, leaving. See [tool/e2e/README.md](tool/e2e/README.md). Native iOS and Android builds
+are not exercised there.
+
+## Public API
+
+Everything is exported from `package:tele_flutter/tele_flutter.dart`. Besides the client, controller
+and screen, the supported building blocks for a custom UI are `TeleStageView`, `TeleChatPanel` and
+`TeleDevicePickers`; other widgets are internal.
 
 ## License
 
