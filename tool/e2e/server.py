@@ -1,8 +1,8 @@
-"""Same-origin stand-in backend for the E2E test. TEST ONLY: it signs tokens for any user it is asked
-for, so never run it anywhere but your machine.
+"""Stand-in backend for the E2E test. TEST ONLY: it signs tokens for any user it is asked for, so
+never run it anywhere but your machine.
 
-Serves the built Flutter web example, a token endpoint, a few helpers for the test, and a proxy to
-the Tele API (which sends no CORS headers, so a browser can't call it from another origin).
+Serves the built Flutter web example, a token endpoint and a few helpers for the test. It does not
+proxy the Tele API: the browser calls Tele directly (Tele allows any origin).
 
     TELE_API_URL, TELE_API_KEY, TELE_API_SECRET   from the environment (never printed)
     python3 server.py <web build dir> <port>
@@ -53,18 +53,6 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def proxy(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        req = urllib.request.Request(API + self.path, data=self.rfile.read(n) if n else None, method=self.command)
-        for k in ("Authorization", "Content-Type", "X-Client-Platform", "Accept"):
-            if self.headers.get(k):
-                req.add_header(k, self.headers[k])
-        try:
-            with urllib.request.urlopen(req) as r:
-                self.send(r.status, r.read(), r.headers.get("Content-Type", "application/json"))
-        except urllib.error.HTTPError as e:
-            self.send(e.code, e.read())
-
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(url.query))
@@ -76,8 +64,6 @@ class Handler(SimpleHTTPRequestHandler):
                                                                    "access_policy": "any_client_user"}))
         if url.path == "/e2e/end":
             return self.send(*tele("POST", f"/v1/calls/{q['call']}/end", q["host"]))
-        if url.path.startswith("/v1/"):
-            return self.proxy()
         self.send(404, b"{}")
 
     def do_GET(self):
@@ -87,11 +73,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send(*tele("GET", f"/v1/calls/{q['call']}/messages", q["user"]))
         if url.path == "/e2e/sessions":
             return self.send(*tele("GET", f"/v1/calls/{q['call']}/sessions", q["host"]))
-        if url.path.startswith("/v1/"):
-            return self.proxy()
         return super().do_GET()
-
-    do_PUT = do_PATCH = do_DELETE = proxy
 
 
 if __name__ == "__main__":

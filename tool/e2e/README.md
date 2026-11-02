@@ -13,6 +13,8 @@ It checks:
   messages are saved (`GET /v1/calls/{id}/messages`);
 - pinning and unpinning the other's tile;
 - the call record shows `flutter-web` for both participants;
+- previews, joins, history and saving chat messages went from the browsers straight to the Tele
+  API, cross-origin (CORS `*`);
 - the guest leaves and the host sees "1 in call".
 
 ## Run
@@ -28,9 +30,10 @@ node e2e.mjs                # E2E_HEADED=1 to watch, E2E_SKIP_BUILD=1 to reuse e
 ```
 
 `server.py` is a **test-only** stand-in for your backend: it serves the web build, signs user
-tokens for whichever user the test asks for, and forwards `/v1` to the Tele API from the same
-origin (the Tele API sends no CORS headers). It reads the secret from the environment and never
-prints it. Never deploy it.
+tokens for whichever user the test asks for, and has small helpers for the test. It does not proxy
+Tele: the browsers call the Tele API directly from another origin, which the test checks (CORS,
+including saving chat messages). It reads the secret from the environment and never prints it.
+Never deploy it.
 
 Not covered here: native iOS and Android builds (no device or simulator in this setup), and
 publishing a screen share (the fake-device flags don't provide one).

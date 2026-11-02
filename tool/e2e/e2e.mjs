@@ -12,6 +12,10 @@ const example = path.resolve(here, '../../example');
 const port = Number(process.env.E2E_PORT ?? 8791);
 const origin = `http://127.0.0.1:${port}`;
 const flutter = process.env.FLUTTER ?? 'flutter';
+// The browser talks to Tele directly (Tele allows any origin); the local server only serves the
+// build, the token endpoint and test helpers.
+const teleApi = (process.env.TELE_API_URL ?? '').replace(/\/+$/, '');
+const teleCalls = []; // Tele API requests the browsers made, with the CORS header Tele answered
 const suffix = Math.random().toString(36).slice(2, 8);
 const host = { id: `tele-flutter-e2e-host-${suffix}`, name: 'E2E Host' };
 const guest = { id: `tele-flutter-e2e-guest-${suffix}`, name: 'E2E Guest' };
@@ -67,11 +71,16 @@ async function openApp(browser, who, code) {
   const context = await browser.newContext({ permissions: ['camera', 'microphone'], viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
   page.on('pageerror', (e) => console.log(`[${who.name}] page error: ${e.message}`));
+  page.on('response', (r) => {
+    if (r.url().startsWith(`${teleApi}/v1/`)) {
+      teleCalls.push({ who: who.name, method: r.request().method(), path: new URL(r.url()).pathname, status: r.status(), cors: r.headers()['access-control-allow-origin'] });
+    }
+  });
   await page.goto(origin);
   await page.locator('flt-semantics-placeholder').waitFor({ state: 'attached', timeout: 30000 });
   await page.evaluate(() => document.querySelector('flt-semantics-placeholder')?.click());
   await typeInto(page, 'Token URL (your backend)', `${origin}/api/tele/token?user=${who.id}&name=${encodeURIComponent(who.name)}`);
-  await typeInto(page, 'Tele API URL', origin);
+  await typeInto(page, 'Tele API URL', teleApi);
   await typeInto(page, 'Invite code', code);
   await control(page, 'Open call').click();
   try {
@@ -93,7 +102,7 @@ let callId;
 try {
   if (!process.env.E2E_SKIP_BUILD) {
     console.log('building the example for web...');
-    execFileSync(flutter, ['build', 'web', `--dart-define=TELE_API_URL=${origin}`, `--dart-define=TELE_TOKEN_URL=${origin}/api/tele/token`], {
+    execFileSync(flutter, ['build', 'web', `--dart-define=TELE_API_URL=${teleApi}`, `--dart-define=TELE_TOKEN_URL=${origin}/api/tele/token`], {
       cwd: example,
       stdio: 'inherit',
     });
@@ -164,6 +173,14 @@ try {
   check('host pins the guest', !!(await waitFor(async () => control(h.page, `Unpin ${guest.name}`).isVisible())));
   await control(h.page, `Unpin ${guest.name}`).click();
   check('host unpins the guest', !!(await waitFor(async () => control(h.page, `Pin ${guest.name}`).isVisible())));
+
+  // Everything above went from the browser straight to Tele, across origins. The save answers 201 when
+  // new, or 200 when Tele's chat recorder already stored the message from the room (deduplicated).
+  const posts = teleCalls.filter((c) => c.method === 'POST' && c.path.endsWith('/messages'));
+  check('chat messages were saved by the browsers directly on Tele (CORS)', posts.length === 2 && posts.every((c) => (c.status === 201 || c.status === 200) && c.cors === '*'), JSON.stringify(posts));
+  const kinds = new Set(teleCalls.map((c) => `${c.method} ${c.path.replace(/\/v1\/(calls|invites)\/[^/]+/, '/v1/$1/{id}')}`));
+  check('previews, joins and history also went to Tele directly', ['GET /v1/invites/{id}', 'POST /v1/invites/{id}/join', 'GET /v1/calls/{id}/messages'].every((k) => kinds.has(k)), [...kinds].join(', '));
+  check('the page origin is not the Tele origin', new URL(origin).origin !== new URL(teleApi).origin);
 
   const sessions = await json(await fetch(`${origin}/e2e/sessions?call=${callId}&host=${host.id}`));
   const platforms = sessions.sessions.flatMap((s) => s.participants.map((p) => p.platform));
