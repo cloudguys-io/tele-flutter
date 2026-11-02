@@ -455,6 +455,24 @@ void main() {
     expect(other.calls, contains('dispose'));
   });
 
+  test('chat history can come from the backend route (Flutter web)', () async {
+    final urls = <String>[];
+    final client = TeleClient(
+      baseUrl: Uri.parse('https://tele.test'),
+      tokenProvider: () async => 't',
+      joinProxy: TeleJoinProxy.backend(Uri.parse('https://app.test/api/tele')),
+      httpClient: MockClient((req) async {
+        urls.add('${req.method} ${req.url.replace(query: '')}');
+        return http.Response.bytes(utf8.encode(jsonEncode({'messages': [messageJson]})), 200);
+      }),
+    );
+    final c = make(client: client);
+    await c.join();
+    await settle();
+    expect(c.messages.single.id, 'TS_x2');
+    expect(urls, ['GET https://app.test/api/tele/calls/c2/messages?']);
+  });
+
   group('review fixes', () {
     test('an invite call rejoins by call id, so the invite is not used again', () async {
       final backend = Backend();

@@ -7,7 +7,9 @@ First release.
 - `TeleClient`: the Tele REST API as the signed-in user. Calls, members, sessions, invites, invite
   preview, joins (with `X-Client-Platform`), chat history and saving, recordings, `me`, diagnostics.
   Tokens come from your token provider, are refreshed before expiry and once on a `401`. Joins can
-  go through your backend with `TeleJoinProxy`. Errors are `TeleException` with `status`, `code`,
+  go through your backend with `TeleJoinProxy`; `TeleJoinProxy.backend` follows the shared `/api/tele`
+  route convention and can also read chat history from `GET /api/tele/calls/{id}/messages` (for
+  Flutter web, where Tele sends no CORS headers). Joins send `X-Client-Platform: flutter-<os>`. Errors are `TeleException` with `status`, `code`,
   `message` and `opensAt`.
 - `TeleCallController`: lobby preview, connect with the join response's `ws_url`, `token` and
   `ice_servers`, microphone, camera, camera flip, speakerphone, screen share, devices, active

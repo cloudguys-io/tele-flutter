@@ -3,7 +3,7 @@
 // The app asks YOUR backend for a Tele user token (POST <token URL> returns {"token": "..."}); the
 // API secret stays on the backend. Defaults can be baked in at build time:
 //
-//   flutter run --dart-define=TELE_TOKEN_URL=https://yourapp.example/api/tele-token \
+//   flutter run --dart-define=TELE_TOKEN_URL=https://yourapp.example/api/tele/token \
 //               --dart-define=TELE_API_URL=https://tele-api.cloudguys.io \
 //               --dart-define=TELE_INVITE=q3V9x2...
 import 'dart:convert';
@@ -12,7 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:tele_flutter/tele_flutter.dart';
 
-const _tokenUrl = String.fromEnvironment('TELE_TOKEN_URL', defaultValue: 'http://localhost:8000/api/tele-token');
+const _tokenUrl = String.fromEnvironment('TELE_TOKEN_URL', defaultValue: 'http://localhost:8000/api/tele/token');
 const _apiUrl = String.fromEnvironment('TELE_API_URL', defaultValue: 'https://tele-api.cloudguys.io');
 const _invite = String.fromEnvironment('TELE_INVITE');
 

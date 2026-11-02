@@ -68,8 +68,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(url.query))
-        if url.path == "/api/tele-token":
-            return self.send(200, json.dumps({"token": user_token(q["user"], q.get("name", q["user"]))}).encode())
+        if url.path == "/api/tele/token":
+            return self.send(200, json.dumps({"token": user_token(q["user"], q.get("name", q["user"])),
+                                              "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 900))}).encode())
         if url.path == "/e2e/call":
             return self.send(*tele("POST", "/v1/calls", q["host"], {"title": q.get("title", "tele-flutter e2e"),
                                                                    "access_policy": "any_client_user"}))

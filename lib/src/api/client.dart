@@ -19,14 +19,38 @@ class TeleJoinTarget {
   final String? callId;
 }
 
-/// Routes joins through your backend instead of calling Tele directly.
+/// Routes joins (and optionally chat history) through your backend instead of calling Tele directly.
 ///
 /// The client POSTs to [url] with `X-Client-Platform` and [headers] (your own auth, not a Tele token).
 /// Your backend calls Tele's join endpoint and returns the join response as is, or the Tele error body.
+///
+/// With [messages] set, [TeleClient.listMessages] (and so the call screen's chat history) GETs that
+/// URL with `after` and `limit` passed through, and your backend returns Tele's body unchanged. Use it
+/// on Flutter web, where the browser can't call Tele directly (Tele sends no CORS headers).
+///
+/// The shared backend convention is `/api/tele`: see [TeleJoinProxy.backend].
 class TeleJoinProxy {
-  const TeleJoinProxy({required this.url, this.headers});
+  const TeleJoinProxy({required this.url, this.headers, this.messages});
+
+  /// The shared route convention under [base] (for example `https://yourapp.example/api/tele`):
+  /// `POST {base}/invites/{code}/join`, `POST {base}/calls/{id}/join` and
+  /// `GET {base}/calls/{id}/messages`.
+  factory TeleJoinProxy.backend(Uri base, {FutureOr<Map<String, String>> Function()? headers, bool messages = true}) {
+    final root = base.toString().replaceFirst(RegExp(r'/+$'), '');
+    return TeleJoinProxy(
+      url: (t) => Uri.parse(t.inviteCode != null
+          ? '$root/invites/${Uri.encodeComponent(t.inviteCode!)}/join'
+          : '$root/calls/${Uri.encodeComponent(t.callId!)}/join'),
+      messages: messages ? (callId) => Uri.parse('$root/calls/${Uri.encodeComponent(callId)}/messages') : null,
+      headers: headers,
+    );
+  }
+
   final Uri Function(TeleJoinTarget target) url;
   final FutureOr<Map<String, String>> Function()? headers;
+
+  /// Where to read a call's chat history, or null to read it from Tele.
+  final Uri Function(String callId)? messages;
 }
 
 /// The `X-Client-Platform` value for this device, naming the SDK and the OS so the call record
@@ -224,9 +248,20 @@ class TeleClient {
 
   /// `GET /v1/calls/{id}/messages`: one page, ordered by `sent_at`. Pass the last message's id as
   /// [after] for the next page. [limit] defaults to 200 on the server (maximum 500).
+  ///
+  /// With [TeleJoinProxy.messages] set, this reads from your backend instead.
   Future<List<TeleChatMessage>> listMessages(String callId, {String? after, int? limit}) async {
-    final j = await _json('GET', '/v1/calls/${_seg(callId)}/messages',
-        query: {'after': ?after, if (limit != null) 'limit': '$limit'});
+    final query = {'after': ?after, if (limit != null) 'limit': '$limit'};
+    final proxy = joinProxy;
+    final viaBackend = proxy?.messages;
+    if (proxy != null && viaBackend != null) {
+      final base = viaBackend(callId);
+      final uri = base.replace(queryParameters: {...base.queryParameters, ...query});
+      final extra = await proxy.headers?.call() ?? const <String, String>{};
+      final req = http.Request('GET', uri)..headers.addAll({'Accept': 'application/json', ...extra});
+      return _items(_decode(await _roundTrip(req)), 'messages', TeleChatMessage.fromJson);
+    }
+    final j = await _json('GET', '/v1/calls/${_seg(callId)}/messages', query: query);
     return _items(j, 'messages', TeleChatMessage.fromJson);
   }
 

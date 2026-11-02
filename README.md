@@ -52,9 +52,18 @@ Android, `android/app/src/main/AndroidManifest.xml`:
 To keep a call alive in the background on Android 14 and later, your app needs a foreground service
 of type `microphone|camera`. The [example](example/) has both files set up.
 
-**Web:** the Tele API does not send CORS headers, so a browser can't call it from another origin.
-For Flutter web, point `baseUrl` at a same-origin path that your server forwards to Tele, or use a
-`TeleJoinProxy` and keep the other calls on your backend.
+**Web:** Tele sends no CORS headers, so a browser can't call the Tele API from your app's origin.
+On Flutter web, a `TeleJoinProxy` alone only fixes joins: the call screen's chat history
+(`GET /v1/calls/{id}/messages`) and saving sent messages (`POST /v1/calls/{id}/messages`) would still
+go to Tele and be blocked. Pick one:
+
+- set `baseUrl` to a same-origin path that your server forwards to Tele's `/v1` (everything works as
+  on native), or
+- route through your backend with `TeleJoinProxy.backend(...)`, which also reads chat history from
+  `GET /api/tele/calls/{id}/messages`, and pass `persistChat: false` (Tele's recorder still saves
+  every message sent over `lk.chat`; the extra `POST` is only a stronger guarantee).
+
+See [Joining through your backend](#joining-through-your-backend).
 
 ## Security
 
@@ -65,15 +74,19 @@ asks your backend for one:
 ```dart
 final tele = TeleClient(
   tokenProvider: () async {
-    final res = await http.post(Uri.parse('https://yourapp.example/api/tele-token'),
+    final res = await http.post(Uri.parse('https://yourapp.example/api/tele/token'),
         headers: {'Authorization': 'Bearer ${await mySession()}'});
     return (jsonDecode(res.body) as Map<String, dynamic>)['token'] as String;
   },
 );
 ```
 
-See the guide's Authentication page for the token endpoint. Never put the API secret, or a service
-token, in an app.
+`POST /api/tele/token` returning `{"token": "...", "expires_at": "..."}` is the shared route
+convention of the Tele backend SDKs (see the guide's Authentication page). Never put the API
+secret, or a service token, in an app.
+
+Treat invite codes like bearer links: anyone with the code can preview the call and (per its access
+policy) join. Don't log them.
 
 ## Quickstart
 
@@ -185,21 +198,58 @@ A response that isn't a Tele error body becomes `http_<status>`; no response is 
 
 ### Joining through your backend
 
-To keep joins on your server (for example to log them, or for Flutter web), set a join proxy. The
-client POSTs to your URL with `X-Client-Platform` and your headers, and your backend returns Tele's
-join response, or Tele's error body, unchanged:
+Tele backend SDKs expose a shared set of routes under `/api/tele`:
+
+| Method | Path | Does |
+|---|---|---|
+| `POST` | `/api/tele/token` | a user token for the signed-in user |
+| `POST` | `/api/tele/invites/{code}/join` | invite join, as the user |
+| `POST` | `/api/tele/calls/{id}/join` | call join with a service token carrying the user's IP and user agent |
+| `GET` | `/api/tele/calls/{id}/messages` | chat history, as the user (`after` and `limit` passed through) |
+
+`TeleJoinProxy.backend` points the client at them. Joins POST there with `X-Client-Platform` and
+your headers; history is read there too. Your backend returns Tele's bodies, and Tele's error shape,
+unchanged:
 
 ```dart
 final tele = TeleClient(
-  tokenProvider: getTeleToken,
-  joinProxy: TeleJoinProxy(
-    url: (t) => t.inviteCode != null
-        ? Uri.parse('https://yourapp.example/api/tele/join?code=${Uri.encodeComponent(t.inviteCode!)}')
-        : Uri.parse('https://yourapp.example/api/calls/${t.callId}/join'),
+  tokenProvider: getTeleToken, // POST https://yourapp.example/api/tele/token
+  joinProxy: TeleJoinProxy.backend(
+    Uri.parse('https://yourapp.example/api/tele'),
     headers: () async => {'Authorization': 'Bearer ${await mySession()}'},
   ),
 );
 ```
+
+That is the same as:
+
+```dart
+TeleJoinProxy(
+  url: (t) => t.inviteCode != null
+      ? Uri.parse('https://yourapp.example/api/tele/invites/${Uri.encodeComponent(t.inviteCode!)}/join')
+      : Uri.parse('https://yourapp.example/api/tele/calls/${Uri.encodeComponent(t.callId!)}/join'),
+  messages: (callId) => Uri.parse('https://yourapp.example/api/tele/calls/${Uri.encodeComponent(callId)}/messages'),
+  headers: () async => {'Authorization': 'Bearer ${await mySession()}'},
+)
+```
+
+**Which IP the call record shows.** For user-token calls, Tele records the IP the request came from,
+and it trusts no proxy in front of hosted Tele. So:
+
+- **Call-id joins through the backend** (`/api/tele/calls/{id}/join`) use a service token that
+  carries the end user's IP, so the record shows the user's IP.
+- **Invite joins through a backend** record the **backend's** IP. Browsers can't avoid this, because
+  Tele sends no CORS headers. **Native apps** (iOS, Android, desktop) can: leave out `joinProxy` and
+  call `POST /v1/invites/{code}/join` directly with a user token, and Tele sees the device's IP.
+- After the first invite join, rejoins go through the call-id route (`TeleCallController.invite`
+  already does this), so they don't use up the invite and, through the backend, carry the user's IP.
+
+### `X-Client-Platform`
+
+Joins send `X-Client-Platform` so the call record shows the device. The default is `flutter-<os>`:
+`flutter-android`, `flutter-ios`, `flutter-web`, `flutter-macos`, `flutter-windows`,
+`flutter-linux` or `flutter-fuchsia` (from `defaultTelePlatform()`). Pass `platform:` to send your own
+value (at most 32 characters). A join proxy forwards the header to Tele.
 
 ## `TeleCallScreen`
 
@@ -326,7 +376,7 @@ call screen:
 
 ```bash
 cd example
-flutter run --dart-define=TELE_TOKEN_URL=https://yourapp.example/api/tele-token \
+flutter run --dart-define=TELE_TOKEN_URL=https://yourapp.example/api/tele/token \
             --dart-define=TELE_INVITE=<invite code>
 ```
 

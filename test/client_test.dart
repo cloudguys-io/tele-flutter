@@ -296,6 +296,49 @@ void main() {
     });
   });
 
+  group('backend route convention', () {
+    test('TeleJoinProxy.backend joins and reads history under /api/tele', () async {
+      final seen = <String>[];
+      final client = TeleClient(
+        baseUrl: Uri.parse('https://tele.test'),
+        platform: 'flutter-web',
+        tokenProvider: () async => fail('no Tele token when everything goes through the backend'),
+        joinProxy: TeleJoinProxy.backend(Uri.parse('https://app.test/api/tele/'), headers: () => {'Cookie': 's=1'}),
+        httpClient: MockClient((req) async {
+          seen.add('${req.method} ${req.url} ${req.headers['Cookie']} ${req.headers['X-Client-Platform']}');
+          if (req.url.path.endsWith('/messages')) {
+            return http.Response.bytes(utf8.encode(jsonEncode({'messages': [messageJson]})), 200);
+          }
+          return http.Response(jsonEncode(joinJson), 200);
+        }),
+      );
+      await client.joinInvite('a/b');
+      await client.joinCall('c 1');
+      final msgs = await client.listMessages('c 1', after: 'm0', limit: 5);
+      expect(msgs.single.streamId, 'TS_x2');
+      expect(seen, [
+        'POST https://app.test/api/tele/invites/a%2Fb/join s=1 flutter-web',
+        'POST https://app.test/api/tele/calls/c%201/join s=1 flutter-web',
+        'GET https://app.test/api/tele/calls/c%201/messages?after=m0&limit=5 s=1 null',
+      ]);
+    });
+
+    test('history stays on Tele when the proxy has no messages route', () async {
+      final seen = <String>[];
+      final client = TeleClient(
+        baseUrl: Uri.parse('https://tele.test'),
+        tokenProvider: () async => 't',
+        joinProxy: TeleJoinProxy.backend(Uri.parse('https://app.test/api/tele'), messages: false),
+        httpClient: MockClient((req) async {
+          seen.add(req.url.toString());
+          return http.Response('{"messages":[]}', 200);
+        }),
+      );
+      await client.listMessages('c1');
+      expect(seen, ['https://tele.test/v1/calls/c1/messages']);
+    });
+  });
+
   group('chat', () {
     test('listMessages pages with after and limit', () async {
       final api = FakeApi({

@@ -70,7 +70,7 @@ async function openApp(browser, who, code) {
   await page.goto(origin);
   await page.locator('flt-semantics-placeholder').waitFor({ state: 'attached', timeout: 30000 });
   await page.evaluate(() => document.querySelector('flt-semantics-placeholder')?.click());
-  await typeInto(page, 'Token URL (your backend)', `${origin}/api/tele-token?user=${who.id}&name=${encodeURIComponent(who.name)}`);
+  await typeInto(page, 'Token URL (your backend)', `${origin}/api/tele/token?user=${who.id}&name=${encodeURIComponent(who.name)}`);
   await typeInto(page, 'Tele API URL', origin);
   await typeInto(page, 'Invite code', code);
   await control(page, 'Open call').click();
@@ -93,7 +93,7 @@ let callId;
 try {
   if (!process.env.E2E_SKIP_BUILD) {
     console.log('building the example for web...');
-    execFileSync(flutter, ['build', 'web', `--dart-define=TELE_API_URL=${origin}`, `--dart-define=TELE_TOKEN_URL=${origin}/api/tele-token`], {
+    execFileSync(flutter, ['build', 'web', `--dart-define=TELE_API_URL=${origin}`, `--dart-define=TELE_TOKEN_URL=${origin}/api/tele/token`], {
       cwd: example,
       stdio: 'inherit',
     });
