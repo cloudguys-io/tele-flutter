@@ -19,14 +19,15 @@ class TeleJoinTarget {
   final String? callId;
 }
 
-/// Routes joins (and optionally chat history) through your backend instead of calling Tele directly.
+/// Optionally routes joins (and chat history) through your backend instead of calling Tele directly.
 ///
 /// The client POSTs to [url] with `X-Client-Platform` and [headers] (your own auth, not a Tele token).
 /// Your backend calls Tele's join endpoint and returns the join response as is, or the Tele error body.
 ///
 /// With [messages] set, [TeleClient.listMessages] (and so the call screen's chat history) GETs that
-/// URL with `after` and `limit` passed through, and your backend returns Tele's body unchanged. Use it
-/// on Flutter web, where the browser can't call Tele directly (Tele sends no CORS headers).
+/// URL with `after` and `limit` passed through, and your backend returns Tele's body unchanged.
+/// Without a proxy the client talks to Tele directly, on native and on the web (Tele allows any
+/// origin).
 ///
 /// The shared backend convention is `/api/tele`: see [TeleJoinProxy.backend].
 class TeleJoinProxy {
@@ -90,6 +91,12 @@ class TeleClient {
 
   static final Uri defaultBaseUrl = Uri.parse('https://tele-api.cloudguys.io');
 
+  /// The largest `limit` Tele accepts for `GET /v1/calls`.
+  static const maxCallsLimit = 200;
+
+  /// The largest `limit` Tele accepts for `GET /v1/calls/{id}/messages`.
+  static const maxMessagesLimit = 500;
+
   final Uri baseUrl;
 
   /// Sent as `X-Client-Platform` on joins (≤32 characters).
@@ -148,8 +155,10 @@ class TeleClient {
     return TeleCall.fromJson(await _json('POST', '/v1/calls', body: body));
   }
 
-  /// `GET /v1/calls`: calls you're a member of, newest first.
+  /// `GET /v1/calls`: calls you're a member of, newest first. [limit] is 1–200 (server default 50);
+  /// anything else throws a [RangeError] before the request, as the server would answer `400`.
   Future<List<TeleCall>> listCalls({List<TeleCallStatus>? statuses, DateTime? from, DateTime? to, int? limit}) async {
+    if (limit != null) RangeError.checkValueInInterval(limit, 1, maxCallsLimit, 'limit');
     final j = await _json('GET', '/v1/calls', query: {
       if (statuses != null && statuses.isNotEmpty) 'status': statuses.map((s) => s.value).join(','),
       if (from != null) 'from': teleTime(from),
@@ -247,10 +256,12 @@ class TeleClient {
   // ---- chat ----
 
   /// `GET /v1/calls/{id}/messages`: one page, ordered by `sent_at`. Pass the last message's id as
-  /// [after] for the next page. [limit] defaults to 200 on the server (maximum 500).
+  /// [after] for the next page. [limit] is 1–500 (server default 200); anything else throws a
+  /// [RangeError] before the request, as the server would answer `400`.
   ///
   /// With [TeleJoinProxy.messages] set, this reads from your backend instead.
   Future<List<TeleChatMessage>> listMessages(String callId, {String? after, int? limit}) async {
+    if (limit != null) RangeError.checkValueInInterval(limit, 1, maxMessagesLimit, 'limit');
     final query = {'after': ?after, if (limit != null) 'limit': '$limit'};
     final proxy = joinProxy;
     final viaBackend = proxy?.messages;
@@ -266,7 +277,8 @@ class TeleClient {
   }
 
   /// Every saved message, following `after` until a page comes back short.
-  Future<List<TeleChatMessage>> listAllMessages(String callId, {int pageSize = 500}) async {
+  Future<List<TeleChatMessage>> listAllMessages(String callId, {int pageSize = maxMessagesLimit}) async {
+    RangeError.checkValueInInterval(pageSize, 1, maxMessagesLimit, 'pageSize');
     final all = <TeleChatMessage>[];
     String? after;
     while (true) {

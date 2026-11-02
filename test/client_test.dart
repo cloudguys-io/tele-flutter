@@ -339,6 +339,18 @@ void main() {
     });
   });
 
+  test('limits outside the server range are refused before any request', () async {
+    final api = FakeApi({});
+    for (final bad in [0, 201, -1]) {
+      expect(() => api.client.listCalls(limit: bad), throwsRangeError);
+    }
+    for (final bad in [0, 501]) {
+      expect(() => api.client.listMessages('c1', limit: bad), throwsRangeError);
+      expect(() => api.client.listAllMessages('c1', pageSize: bad), throwsRangeError);
+    }
+    expect(api.requests, isEmpty);
+  });
+
   group('chat', () {
     test('listMessages pages with after and limit', () async {
       final api = FakeApi({
