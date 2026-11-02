@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0
+
+- Flutter web talks to Tele directly. The Tele API now allows any origin (CORS, auth only through
+  the `Authorization` header), so the "no CORS", `persistChat: false` on web and backend-IP caveats
+  are gone from the docs. `TeleJoinProxy` stays optional on every platform.
+- Docs follow the v0.2.0 route convention: both backend join routes
+  (`/api/tele/invites/{code}/join` and `/api/tele/calls/{id}/join`) are service-token joins carrying
+  the end user's IP and user agent, so Tele always records the user's IP; direct calls record the
+  device's IP.
+- `listCalls(limit:)` must be 1–200 and `listMessages(limit:)` / `listAllMessages(pageSize:)` 1–500,
+  as the server now enforces; other values throw a `RangeError` before any request.
+  `TeleClient.maxCallsLimit` and `TeleClient.maxMessagesLimit` name the bounds.
+- `tool/e2e` no longer proxies `/v1`: the browsers call the Tele API cross-origin, and the test checks
+  it (previews, joins, history and saving chat messages, all answered with
+  `Access-Control-Allow-Origin: *`).
+
+Tested: `flutter analyze` (package and example) clean; `flutter test` and the live API tests pass;
+`tool/e2e` 23/23 checks (2026-11-03, Flutter 3.47.9 web, Chrome with fake devices, local Tele API and
+LiveKit, browsers calling Tele directly).
+
 ## 0.1.0
 
 First release.

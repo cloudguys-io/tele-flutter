@@ -21,7 +21,7 @@ dependencies:
   tele_flutter:
     git:
       url: https://github.com/cloudguys-io/tele-flutter
-      ref: v0.1.0
+      ref: v0.2.0
 ```
 
 It needs Dart 3.10 and Flutter 3.38 or later, and depends on `livekit_client` ^2.13.1 (2.12.0 or
@@ -52,18 +52,10 @@ Android, `android/app/src/main/AndroidManifest.xml`:
 To keep a call alive in the background on Android 14 and later, your app needs a foreground service
 of type `microphone|camera`. The [example](example/) has both files set up.
 
-**Web:** Tele sends no CORS headers, so a browser can't call the Tele API from your app's origin.
-On Flutter web, a `TeleJoinProxy` alone only fixes joins: the call screen's chat history
-(`GET /v1/calls/{id}/messages`) and saving sent messages (`POST /v1/calls/{id}/messages`) would still
-go to Tele and be blocked. Pick one:
-
-- set `baseUrl` to a same-origin path that your server forwards to Tele's `/v1` (everything works as
-  on native), or
-- route through your backend with `TeleJoinProxy.backend(...)`, which also reads chat history from
-  `GET /api/tele/calls/{id}/messages`, and pass `persistChat: false` (Tele's recorder still saves
-  every message sent over `lk.chat`; the extra `POST` is only a stronger guarantee).
-
-See [Joining through your backend](#joining-through-your-backend).
+**Web:** Flutter web works like native. The Tele API allows any origin (CORS, with auth only through
+the `Authorization` header, no cookies), so `TeleClient` calls Tele directly from the browser with a
+user token: joins, chat history and saving messages included. A join proxy is optional on every
+platform; see [Joining through your backend](#joining-through-your-backend).
 
 ## Security
 
@@ -196,14 +188,16 @@ try {
 A response that isn't a Tele error body becomes `http_<status>`; no response is `network_error` or
 `timeout`; a failing token provider is `token_provider`.
 
-### Joining through your backend
+### Joining through your backend (optional)
 
-Tele backend SDKs expose a shared set of routes under `/api/tele`:
+By default `TeleClient` calls Tele directly with the user token, on native and on the web. If you
+would rather keep joins on your server (for example to log them or add your own checks), Tele
+backend SDKs expose a shared set of routes under `/api/tele`:
 
 | Method | Path | Does |
 |---|---|---|
 | `POST` | `/api/tele/token` | a user token for the signed-in user |
-| `POST` | `/api/tele/invites/{code}/join` | invite join, as the user |
+| `POST` | `/api/tele/invites/{code}/join` | invite join with a service token carrying the user's IP and user agent |
 | `POST` | `/api/tele/calls/{id}/join` | call join with a service token carrying the user's IP and user agent |
 | `GET` | `/api/tele/calls/{id}/messages` | chat history, as the user (`after` and `limit` passed through) |
 
@@ -233,16 +227,15 @@ TeleJoinProxy(
 )
 ```
 
-**Which IP the call record shows.** For user-token calls, Tele records the IP the request came from,
-and it trusts no proxy in front of hosted Tele. So:
+**Which IP the call record shows.** Tele always records the end user's IP:
 
-- **Call-id joins through the backend** (`/api/tele/calls/{id}/join`) use a service token that
-  carries the end user's IP, so the record shows the user's IP.
-- **Invite joins through a backend** record the **backend's** IP. Browsers can't avoid this, because
-  Tele sends no CORS headers. **Native apps** (iOS, Android, desktop) can: leave out `joinProxy` and
-  call `POST /v1/invites/{code}/join` directly with a user token, and Tele sees the device's IP.
+- **Directly** (native or browser, user token): Tele records the IP the request comes from, which is
+  the user's device.
+- **Through your backend:** both join routes use a service token whose `user` body carries the end
+  user's IP and user agent. Hosted Tele trusts no proxy's `X-Forwarded-For`, so the backend must pass
+  them in the body.
 - After the first invite join, rejoins go through the call-id route (`TeleCallController.invite`
-  already does this), so they don't use up the invite and, through the backend, carry the user's IP.
+  already does this), so they don't use up the invite.
 
 ### `X-Client-Platform`
 
@@ -395,8 +388,8 @@ flutter test test/integration
 ### End-to-end test
 
 `tool/e2e/` drives the web example in two Chrome contexts (host and guest) with fake camera and
-microphone against a live Tele API and LiveKit: lobby preview, both video tiles, chat both ways and
-saved, pinning, leaving. See [tool/e2e/README.md](tool/e2e/README.md). Native iOS and Android builds
+microphone against a live Tele API and LiveKit, with the browsers calling Tele directly across
+origins: lobby preview, both video tiles, chat both ways and saved, pinning, leaving. See [tool/e2e/README.md](tool/e2e/README.md). Native iOS and Android builds
 are not exercised there.
 
 ## Public API

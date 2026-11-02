@@ -1,6 +1,6 @@
 name: tele_flutter
 description: Tele video calling for Flutter apps. A Tele API client acting as the signed-in user and a prebuilt call screen on livekit_client.
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/cloudguys-io/tele-flutter
 publish_to: none
 

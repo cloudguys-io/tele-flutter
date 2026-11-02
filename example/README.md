@@ -20,6 +20,5 @@ Camera, microphone and background audio permissions are already set in
 `ios/Runner/Info.plist` and `android/app/src/main/AndroidManifest.xml`. On Android 14 and later,
 add a foreground service of type `microphone|camera` to keep calls alive in the background.
 
-For Flutter web, Tele sends no CORS headers, so the browser can't call it directly: serve the app
-and a proxy to Tele's `/v1` from the same origin and set `TELE_API_URL` to that origin (this is what
-`tool/e2e/server.py` does). Native builds call Tele directly, so Tele records the device's IP.
+The same build runs on the web: Tele allows any origin, so the browser calls the Tele API directly
+with the user token.
