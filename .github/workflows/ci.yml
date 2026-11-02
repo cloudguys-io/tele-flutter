@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      # Live API tests in test/integration skip because TELE_API_* are not set here.
+      - run: flutter test
+      - name: Example
+        working-directory: example
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter build web
