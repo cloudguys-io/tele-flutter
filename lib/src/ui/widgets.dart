@@ -33,6 +33,8 @@ class TeleControlButton extends StatelessWidget {
 
   /// For toggles: announced as pressed or not.
   final bool? toggled;
+
+  /// A count shown on the button. Put it in [label] too, for screen readers.
   final int? badge;
 
   @override
@@ -55,7 +57,7 @@ class TeleControlButton extends StatelessWidget {
     );
     return Semantics(
       button: true,
-      label: badge != null && badge! > 0 ? '$label, $badge' : label,
+      label: label,
       toggled: toggled,
       enabled: onPressed != null,
       excludeSemantics: true,
@@ -220,6 +222,7 @@ class TeleTileView extends StatelessWidget {
                   top: 4,
                   right: 4,
                   child: Semantics(
+                    container: true,
                     button: true,
                     toggled: pinned,
                     label: pinLabel,
