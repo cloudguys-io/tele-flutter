@@ -50,6 +50,7 @@ class LiveKitCallEngine implements CallEngine {
   CameraPosition _position = CameraPosition.front;
   bool _speakerphone = true;
   bool _leaving = false;
+  bool _previewWanted = false;
 
   @override
   Stream<CallEngineEvent> get events => _events.stream;
@@ -126,13 +127,22 @@ class LiveKitCallEngine implements CallEngine {
 
   @override
   Future<void> setPreviewCamera(bool on) async {
+    _previewWanted = on;
     if (!on) {
       final t = _preview;
       _preview = null;
       await t?.stop();
       return;
     }
-    _preview ??= await LocalVideoTrack.createCameraTrack(_cameraOptions);
+    if (_preview != null) return;
+    final track = await LocalVideoTrack.createCameraTrack(_cameraOptions);
+    // The camera may have been turned off, or the call joined, while the permission prompt was open.
+    if (!_previewWanted || _preview != null || _room != null) {
+      await track.stop();
+      return;
+    }
+    _preview = track;
+    _emit(const CallEngineChanged());
   }
 
   @override
