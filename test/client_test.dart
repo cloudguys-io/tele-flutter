@@ -118,7 +118,7 @@ void main() {
 
     test('listCalls without filters sends no query', () async {
       final api = FakeApi({
-        'GET /v1/calls': (200, {'calls': []}),
+        'GET /v1/calls': (200, {'calls': <Object>[]}),
       });
       expect(await api.client.listCalls(), isEmpty);
       expect(api.last.url.query, isEmpty);
