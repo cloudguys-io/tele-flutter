@@ -52,9 +52,15 @@ const playingVideos = (page) =>
   page.locator('video').evaluateAll((vs) => vs.filter((v) => v.videoWidth > 0 && v.readyState >= 2).length);
 
 async function typeInto(page, label, value) {
-  await page.getByRole('textbox', { name: label }).click();
+  const box = page.getByRole('textbox', { name: label });
+  await box.click();
+  await page.waitForTimeout(300); // Flutter attaches its editing element after the focus
   await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.press('Backspace');
   await page.keyboard.type(value);
+  await page.waitForTimeout(200);
+  const got = await page.evaluate(() => document.activeElement && 'value' in document.activeElement ? document.activeElement.value : null);
+  if (got !== value) throw new Error(`typing into "${label}" gave ${JSON.stringify(got)}`);
 }
 
 async function openApp(browser, who, code) {
@@ -68,7 +74,11 @@ async function openApp(browser, who, code) {
   await typeInto(page, 'Tele API URL', origin);
   await typeInto(page, 'Invite code', code);
   await control(page, 'Open call').click();
-  await control(page, 'Join call').waitFor({ timeout: 20000 });
+  try {
+    await control(page, 'Join call').waitFor({ timeout: 20000 });
+  } catch (e) {
+    throw new Error(`${who.name} never reached the lobby; page shows: ${JSON.stringify(await text(page))}`);
+  }
   return { context, page };
 }
 
@@ -132,14 +142,13 @@ try {
   const hostMsg = `hello from the host ${suffix}`;
   const guestMsg = `হ্যালো 👋 from the guest ${suffix}`;
   await control(h.page, 'Chat').click();
-  await h.page.getByRole('textbox', { name: 'Message' }).click();
-  await h.page.keyboard.type(hostMsg);
+  await typeInto(h.page, 'Message', hostMsg);
   await control(h.page, 'Send').click();
   check('guest gets an unread badge', !!(await waitFor(async () => control(g.page, 'Chat, 1 unread').isVisible())));
   await control(g.page, 'Chat, 1 unread').click();
-  check('guest sees the host message', !!(await waitFor(async () => (await text(g.page)).includes(hostMsg))));
-  await g.page.getByRole('textbox', { name: 'Message' }).click();
-  await g.page.keyboard.type(guestMsg);
+  const seen = await waitFor(async () => (await text(g.page)).includes(hostMsg));
+  check('guest sees the host message', !!seen, seen ? '' : JSON.stringify(await text(g.page)));
+  await typeInto(g.page, 'Message', guestMsg);
   await control(g.page, 'Send').click();
   check('host sees the guest message (Bangla and emoji)', !!(await waitFor(async () => (await text(h.page)).includes(guestMsg))));
 
